@@ -146,12 +146,12 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, tota
         if args.accum_freq == 1:
             with autocast():
                 inputs, targets = sample_chunk(texts, args)
-                out, _ = model(inputs)
+                output = model(inputs)
 
                 if args.log_logit_mean:
-                    logit_m.update(torch.mean(out).item())
+                    logit_m.update(torch.mean(output.logits).item())
 
-                total_loss = loss(out.reshape(-1, args.vocab_size), targets.reshape(-1))
+                total_loss = loss(output.logits.reshape(-1, args.vocab_size), targets.reshape(-1))
 
             backward(total_loss, scaler)
         else:
@@ -173,13 +173,13 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, tota
                         if inputs_ii.shape[0] == 0:
                             break
                         targets_ii = targets[ii * per_batch : (ii + 1) * per_batch]
-                        out, _ = model(inputs_ii)
+                        output = model(inputs_ii)
 
                         if args.log_logit_mean:
-                            logit_m.update(torch.mean(out).item())
+                            logit_m.update(torch.mean(output.logits).item())
 
                         local_loss = (
-                            loss(out.reshape(-1, args.vocab_size), targets_ii.reshape(-1))
+                            loss(output.logits.reshape(-1, args.vocab_size), targets_ii.reshape(-1))
                             * inputs_ii.shape[0]
                             / inputs.shape[0]
                         )
@@ -294,8 +294,8 @@ def evaluate(model, data, start_epoch, args, writer):
         with autocast():
             inputs, targets = sample_chunk(texts, args)
 
-            out, _ = model(inputs)
-            total_loss = loss(out.reshape(-1, args.vocab_size), targets.reshape(-1))
+            output = model(inputs)
+            total_loss = loss(output.logits.reshape(-1, args.vocab_size), targets.reshape(-1))
             losses_m.update(total_loss.item(), inputs.shape[0])
         batch_time_m.update(time.time() - end)
         sps_m.update(inputs.numel() * args.world_size / batch_time_m.val)

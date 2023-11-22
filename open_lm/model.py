@@ -13,6 +13,7 @@ from torch.nn import functional as F
 import xformers.ops as xops
 
 from huggingface_hub import PyTorchModelHubMixin
+from vllm.model_executor.layers.attention import PagedAttention
 
 from open_lm.norms import get_norm_class
 from open_lm.positional_embedding.head_rotary import HeadRotaryWithCast
@@ -23,6 +24,16 @@ from open_lm.positional_embedding.llama_rotary import LLaMARotaryWithCast
 _MODEL_CONFIG_PATHS = [Path(__file__).parent / f"model_configs/"]
 _MODEL_CONFIGS = {}  # directory (model_name: config) of model architecture configs
 
+
+@dataclass
+class OpenLMOutput:
+    logits: torch.Tensor
+    hidden_state: torch.Tensor
+    cache_dict: dict = None
+
+    @property
+    def kv_cache(self):
+        return (self.cache_dict.get("key_cache", None), self.cache_dict.get("value_cache", None))
 
 def _natural_key(string_):
     return [int(s) if s.isdigit() else s for s in re.split(r"(\d+)", string_.lower())]
@@ -79,7 +90,11 @@ class Params:
 def xformers_attn(queries, keys, values, is_causal):
     # xformers assumes q, k, v are [batch, seq_len, heads, embed_dim]
     mask = None
-    if is_causal:
+
+    # If queries have shape [batch, 1, heads, dim] it means there is only one query in the sequence.
+    # In this case, there is no notion of causal masking, so we can just set the mask to None.
+    # This is actually needed to get the desired behavior with seq_len=1.
+    if is_causal and queries.shape[1] > 1:
         mask = xops.LowerTriangularMask()
     return xops.memory_efficient_attention(queries, keys, values, attn_bias=mask)
 
@@ -88,6 +103,13 @@ def torch_attn(queries, keys, values, is_causal):
     # Need to call contiguous in torch >=2.1, otherwise later calls to .view() fail.
     # Possibly related: https://github.com/pytorch/pytorch/issues/110213 - behavior of scaled_dot_product_attention
     # changed between 2.0 and 2.1
+    if is_causal and queries.shape[-2] != keys.shape[-2]:
+        # This might have an unexpected behavior, warn the user
+        print(
+            f"WARNING: Causal masking is ill-defined when the query sequence size is different from the key sequence size. "
+            f"Check that the computation is the intended one with queries shape: {queries.shape}, keys shape: {keys.shape}"
+        )
+        # TODO: should we raise an error instead? should we set is_causal to False?
     return F.scaled_dot_product_attention(queries, keys, values, is_causal=is_causal).contiguous()
 
 
@@ -112,10 +134,11 @@ class CustomAttn(nn.Module):
         self.out_proj = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
         self.pos_embed = get_pos_embed(args)
         self.attn_fn = xformers_attn if torch.cuda.is_available() else torch_attn
+        std = 1.0 / math.sqrt(args.dim)
+        self.inference_attn_fn = PagedAttention(args.n_heads, self.head_dim, std)
         self.apply_qk_norm = args.apply_qk_norm
 
         # initialize weights by trunc_normal(1/sqrt(fan_in))
-        std = 1.0 / math.sqrt(args.dim)
         torch.nn.init.trunc_normal_(self.in_proj.weight, std=std, a=-3 * std, b=3 * std)
         # scale init by depth as in https://arxiv.org/abs/1908.11365 -- worked slightly better.
         std = std / math.sqrt(2 * (layer_id + 1))
@@ -139,22 +162,31 @@ class CustomAttn(nn.Module):
             else nn.Identity()
         )
 
-    def forward(self, x: torch.Tensor, is_causal=True):
-        batchsize, seqlen, _ = x.shape
+    def forward(self, x: torch.Tensor, is_causal=True, cache_dict=None):
+        batchsize, q_len, _ = x.shape
         queries, keys, vals = self.in_proj(x).chunk(3, dim=-1)
 
         queries = self.q_norm(queries)
         keys = self.k_norm(keys)
 
-        queries = queries.view(batchsize, seqlen, self.n_heads, self.head_dim)
-        keys = keys.view(batchsize, seqlen, self.n_heads, self.head_dim)
-        vals = vals.view(batchsize, seqlen, self.n_heads, self.head_dim)
+        queries = queries.view(batchsize, q_len, self.n_heads, self.head_dim)
+        keys = keys.view(batchsize, q_len, self.n_heads, self.head_dim)
+        vals = vals.view(batchsize, q_len, self.n_heads, self.head_dim)
 
-        queries, keys, vals = self.pos_embed(queries, keys, vals)
+        key_cache = None
+        if cache_dict is not None:
+            key_cache = cache_dict.get("key_cache", None)
+        offset = 0 if key_cache is None else key_cache.shape[1]
 
-        output = self.attn_fn(queries, keys, vals, is_causal=is_causal)
+        queries, keys, vals = self.pos_embed(queries, keys, vals, offset=offset)
 
-        output = output.view(batchsize, seqlen, -1)
+        if self.training or not is_causal or cache_dict is None:
+            output = self.attn_fn(queries, keys, vals, is_causal=is_causal)
+        else:
+            # Cache_dict must define key_cache, value_cache, input_metadata, cache_event
+            output = self.inference_attn_fn(queries, keys, vals, **cache_dict)
+
+        output = output.view(batchsize, q_len, -1)
 
         return self.out_proj(output)
 
@@ -204,8 +236,8 @@ class Block(nn.Module):
             std = std / math.sqrt(2 * (layer_id + 1))
             torch.nn.init.trunc_normal_(self._ff_w2.weight, std=std, a=-3 * std, b=3 * std)
 
-    def forward(self, x):
-        h = x + self.attention(self.attention_norm(x), is_causal=True)
+    def forward(self, x, cache_dict=None):
+        h = x + self.attention(self.attention_norm(x), is_causal=True, cache_dict=cache_dict)
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
@@ -255,20 +287,27 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
     def set_grad_checkpointing(self, enable=True):
         self.grad_checkpointing = enable
 
-    def forward(self, input):
+    def forward(self, input, cache_dict=None):
         x = self.tok_embeddings(input)
         x = self.post_embed_norm(x)
 
-        for layer in self.layers:
+        for layer_id, layer in enumerate(self.layers):
             if self.grad_checkpointing:
                 x = checkpoint(layer, x)
             else:
-                x = layer(x)
+                past_key_values = cache_dict.get("past_key_values", None)
+                if past_key_values is not None:
+                    past_key_value = past_key_values[layer.layer_id]
+                else:
+                    past_key_value = [None, None]
+                layer_cache_dict = {"key_cache": past_key_value[0], "value_cache": past_key_value[1], "input_metadata": cache_dict.get("input_metadata", None), "cache_event": cache_dict.get("cache_event", None)}
+                x = layer(x, cache_dict=layer_cache_dict)
 
         x = self.norm(x)
         output = self.output(x)
         # follow llama in casting this to float.
-        return output.float(), x
+
+        return OpenLMOutput(logits=output.float(), hidden_state=x, cache_dict=cache_dict)
 
     def get_input_embeddings(self):
         return self.tok_embeddings

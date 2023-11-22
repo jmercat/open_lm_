@@ -32,6 +32,7 @@ def run_model(open_lm: OpenLMforCausalLM, tokenizer, args):
         temperature=args.temperature,
         top_p=args.top_p,
         max_new_tokens=args.max_gen_len,
+        use_cache=args.use_cache,
     )
     output = tokenizer.decode(output[0].cpu().numpy())
     print("-" * 50)
@@ -49,6 +50,7 @@ def main():
     parser.add_argument("--max-gen-len", default=200, type=int)
     parser.add_argument("--temperature", default=0.8, type=float)
     parser.add_argument("--top-p", default=0.95, type=float)
+    parser.add_argument("--use-cache", action="store_true", default=False)
 
     add_model_args(parser)
     args = parser.parse_args()

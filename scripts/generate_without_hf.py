@@ -55,12 +55,12 @@ class Generator:
         start_pos = min_prompt_size
         prev_pos = 0
         for cur_pos in range(start_pos, total_len):
-            last_logits = self.model(tokens[:, prev_pos:cur_pos].clone())[0][:, -1, :]
+            output = self.model(tokens[:, prev_pos:cur_pos].clone())[0][:, -1, :]
             if gen_args.temperature > 0:
-                probs = torch.softmax(last_logits / gen_args.temperature, dim=-1)
+                probs = torch.softmax(output.logits / gen_args.temperature, dim=-1)
                 next_token = sample_top_p(probs, gen_args.top_p)
             else:
-                next_token = torch.argmax(last_logits, dim=-1)
+                next_token = torch.argmax(output.logits, dim=-1)
             next_token = next_token.reshape(-1)
             # only replace token if prompt has already been generated
             next_token = torch.where(input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token)

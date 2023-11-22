@@ -4,6 +4,7 @@ from open_lm.utils.transformers.hf_config import OpenLMConfig
 from open_lm.model import Transformer
 import torch
 from typing import Union, Tuple, Optional, List
+from vllm.model_executor.input_metadata import InputMetadata
 
 
 class OpenLMModel(PreTrainedModel):
@@ -52,7 +53,7 @@ class OpenLMforCausalLM(OpenLMModel):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
+        use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
@@ -77,8 +78,14 @@ class OpenLMforCausalLM(OpenLMModel):
         "Hey, are you consciours? Can you talk to me?\nI'm not consciours, but I can talk to you."
         ```"""
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        logits, _ = self.model(input_ids)
-        output = CausalLMOutputWithPast(logits=logits)
+
+        if use_cache:
+            print(f"WARNING: use_cache is not supported for hf_model, please use vllm_model instead.")
+        output = self.model(input_ids, cache_dict=None)
+        output = CausalLMOutputWithPast(
+            logits=output.logits,
+            past_key_values=output.past_key_values
+        )
         return output
 
     def prepare_inputs_for_generation(

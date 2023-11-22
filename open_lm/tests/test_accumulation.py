@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader, Dataset
 from torch import nn
 
 from open_lm.train import train_one_epoch
+from open_lm.model import OpenLMOutput
 
 
 # Dummy model
@@ -19,9 +20,9 @@ class SimpleModel(torch.nn.Module):
 
     def forward(self, x):
         out = self.fc(self.tok_embeddings(x))
-        return out, None
-
-
+        return OpenLMOutput(logits=out)
+    
+    
 # Dummy dataset
 class DummyDataset(Dataset):
     def __init__(self, seq_len, vocab_size):
