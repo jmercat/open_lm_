@@ -1,13 +1,12 @@
 from vllm.entrypoints.llm import LLM
 from open_lm.model import Transformer
 from transformers import PreTrainedModel
-from open_lm.utils.transformers.hf_config import OpenLMConfig
 from open_lm.model import Transformer
 import torch
 from typing import Union, Tuple, Optional, List
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.sequence import SamplerOutput
-from vllm.model_executor.layers.sampler import Sampler, _apply_logits_processors, _get_output_tokens, _get_penalties, _apply_penalties, _get_temperatures, _get_top_p_top_k_min_p, _apply_top_p_top_k, _apply_min_p, _sample, _get_logprobs, _build_sampler_output
+from vllm.model_executor.layers.sampler import Sampler, _get_output_tokens, _get_penalties, _apply_penalties, _get_temperatures, _get_top_p_top_k, _apply_top_p_top_k, _sample, _get_logprobs, _build_sampler_output
 from vllm.model_executor.layers.sampler import _SAMPLING_EPS
 
 class CustomSampler(Sampler):
@@ -20,18 +19,15 @@ class CustomSampler(Sampler):
         with the unique difference that we pass in the logits instead of the hidden_state and the last layer weights.
         """
 
-        # Apply logits processors (if any).
-        logits = _apply_logits_processors(logits, input_metadata)
-        # Apply presence and frequency penalties.
+# Apply presence and frequency penalties.
         output_tokens = _get_output_tokens(input_metadata)
         assert len(output_tokens) == logits.shape[0]
-        presence_penalties, frequency_penalties, repetition_penalties = (
-            _get_penalties(input_metadata))
+        presence_penalties, frequency_penalties = _get_penalties(
+            input_metadata)
         assert len(presence_penalties) == logits.shape[0]
         assert len(frequency_penalties) == logits.shape[0]
-        assert len(repetition_penalties) == logits.shape[0]
         logits = _apply_penalties(logits, output_tokens, presence_penalties,
-                                  frequency_penalties, repetition_penalties)
+                                  frequency_penalties)
 
         # Apply temperature scaling.
         temperatures = _get_temperatures(input_metadata)
@@ -44,17 +40,12 @@ class CustomSampler(Sampler):
             logits.div_(t.unsqueeze(dim=1))
 
         # Apply top-p and top-k truncation.
-        top_ps, top_ks, min_ps = _get_top_p_top_k_min_p(
-            input_metadata, self.vocab_size)
+        top_ps, top_ks = _get_top_p_top_k(input_metadata, self.vocab_size)
         assert len(top_ps) == len(top_ks) == logits.shape[0]
         do_top_p = any(p < 1.0 - _SAMPLING_EPS for p in top_ps)
         do_top_k = any(k != self.vocab_size for k in top_ks)
         if do_top_p or do_top_k:
             logits = _apply_top_p_top_k(logits, top_ps, top_ks)
-
-        do_min_p = any(mp > _SAMPLING_EPS for mp in min_ps)
-        if do_min_p:
-            logits = _apply_min_p(logits, min_ps)
 
         # We use float32 for probabilities and log probabilities.
         # Compute the probabilities.

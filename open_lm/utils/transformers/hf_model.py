@@ -83,8 +83,7 @@ class OpenLMforCausalLM(OpenLMModel):
             print(f"WARNING: use_cache is not supported for hf_model, please use vllm_model instead.")
         output = self.model(input_ids, cache_dict=None)
         output = CausalLMOutputWithPast(
-            logits=output.logits,
-            past_key_values=output.past_key_values
+            logits=output.logits
         )
         return output
 

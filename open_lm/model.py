@@ -295,13 +295,16 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
             if self.grad_checkpointing:
                 x = checkpoint(layer, x)
             else:
-                past_key_values = cache_dict.get("past_key_values", None)
-                if past_key_values is not None:
-                    past_key_value = past_key_values[layer.layer_id]
+                if cache_dict is None:
+                     x = layer(x)
                 else:
-                    past_key_value = [None, None]
-                layer_cache_dict = {"key_cache": past_key_value[0], "value_cache": past_key_value[1], "input_metadata": cache_dict.get("input_metadata", None), "cache_event": cache_dict.get("cache_event", None)}
-                x = layer(x, cache_dict=layer_cache_dict)
+                    past_key_values = cache_dict.get("past_key_values", None)
+                    if past_key_values is not None:
+                        past_key_value = past_key_values[layer.layer_id]
+                    else:
+                        past_key_value = [None, None]
+                    layer_cache_dict = {"key_cache": past_key_value[0], "value_cache": past_key_value[1], "input_metadata": cache_dict.get("input_metadata", None), "cache_event": cache_dict.get("cache_event", None)}
+                    x = layer(x, cache_dict=layer_cache_dict)
 
         x = self.norm(x)
         output = self.output(x)
