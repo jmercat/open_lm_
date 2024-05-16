@@ -4,7 +4,6 @@ import torch
 from torch.nn import functional as F
 import xformers.ops as xops
 
-
 def get_rectangular_causal_mask(shape, q_seq_len, k_seq_len, device, dtype):
     """Create a rectangular causal mask.
 
@@ -188,6 +187,9 @@ def custom_attn(
 
     return torch.einsum("bhqk,bkhd->bqhd", attn_weight, values)
 
+def wrapper_ring_attention(ring_attn_fn, queries, keys, values, is_causal, attention_mask=None, **kwargs):
+    return ring_attn_fn(q=queries, k=keys, v=values, causal=is_causal, mask=attention_mask, **kwargs)
+
 
 def get_attn_func(
     attn_name,
@@ -217,5 +219,7 @@ def get_attn_func(
             attn_seq_scalar,
             alpha,
         )
+    elif attn_name == "ring_attn":
+        return "ring_attn"
     else:
         raise ValueError(f"Unsupported attn-name: {attn_name}")

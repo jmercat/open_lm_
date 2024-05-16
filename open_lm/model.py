@@ -12,6 +12,7 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 import xformers.ops as xops
+from ring_attention_pytorch import RingAttention
 
 from huggingface_hub import PyTorchModelHubMixin
 
@@ -243,7 +244,16 @@ class Block(nn.Module):
         self.dim = args.dim
 
         self.head_dim = args.dim // args.n_heads
-        self.attention = CustomAttn(layer_id, args)
+        if args.attn_func == "ring_attn":
+            self.attention = RingAttention(
+                dim=args.dim,
+                dim_head=self.head_dim,
+                heads=args.n_heads,
+                auto_shard_seq=True,  # shard along the sequence length dimension in the attention layer. Should be done at the model level for better performance.
+                causal=True,
+            )
+        else:
+            self.attention = CustomAttn(layer_id, args)
         self._ffn_type = args.ffn_type
         if args.ffn_type == "swiglu":
             # this follows llama / lit llama -- go to multiple of 256
