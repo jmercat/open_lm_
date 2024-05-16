@@ -5,6 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Callable
+from functools import partial
 
 import torch
 import torch.nn.functional as F
@@ -12,7 +13,7 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 import xformers.ops as xops
-from ring_attention_pytorch import RingAttention
+from ring_attention_pytorch import RingAttention, RingTransformer
 
 from huggingface_hub import PyTorchModelHubMixin
 
@@ -237,21 +238,31 @@ class SwiGLUTorch(nn.Module):
         return self.w3(x)
 
 
+def wrapper_ring_attention(ring_attn, x, is_causal, past_key_value, use_cache, attention_mask):
+    assert not use_cache, "Ring attention does not support caching"
+    assert is_causal, "Ring attention only supports causal mode"
+    return ring_attn(x, mask=attention_mask)
+
+
 class Block(nn.Module):
     def __init__(self, layer_id, args: Params):
         super().__init__()
         self.n_heads = args.n_heads
         self.dim = args.dim
-
         self.head_dim = args.dim // args.n_heads
+        self.no_kv_cache = False
         if args.attn_func == "ring_attn":
-            self.attention = RingAttention(
+            attention = RingAttention(
                 dim=args.dim,
                 dim_head=self.head_dim,
+                ring_seq_size=args.seq_len // torch.distributed.get_world_size(),
                 heads=args.n_heads,
                 auto_shard_seq=True,  # shard along the sequence length dimension in the attention layer. Should be done at the model level for better performance.
                 causal=True,
+                ring_attn=True,
             )
+            self.attention = partial(wrapper_ring_attention, attention)
+            self.no_kv_cache = True
         else:
             self.attention = CustomAttn(layer_id, args)
         self._ffn_type = args.ffn_type
@@ -319,13 +330,19 @@ class Block(nn.Module):
             torch.nn.init.trunc_normal_(self._ff_w2.weight, std=std, a=-3 * std, b=3 * std)
 
     def forward(self, x, past_key_value=None, use_cache=False, attention_mask=None):
-        h, past_key_value = self.attention(
+        out = self.attention(
             self.attention_norm(x),
             is_causal=True,
             past_key_value=past_key_value,
             use_cache=use_cache,
             attention_mask=attention_mask,
         )
+        if self.no_kv_cache:
+            past_key_value = None
+            h = out
+        else:
+            h, past_key_value = out
+
         h = x + h
         if self._ffn_type == "moe":
             ffn_out, _ = self.feed_forward(self.ffn_norm(h))
@@ -456,6 +473,33 @@ def create_params(args):
             "vocab_size": cfg["vocab_size"],
             "seq_len": cfg["seq_len"],
         }
+    elif "ring" in args.model:
+        try:
+            world_size = torch.distributed.get_world_size()
+        except ValueError:
+            world_size = 1
+        args.seq_len = cfg["seq_len"]
+        args.vocab_size = cfg["vocab_size"]
+        return {
+            "num_tokens": cfg["vocab_size"],
+            "dim": cfg["hidden_dim"],
+            "depth": cfg["n_layers"],
+            "causal": True,
+            "dim_head": cfg["hidden_dim"] // cfg["n_heads"],
+            "heads": cfg["n_heads"],
+            "ff_mult": 4,
+            "num_grouped_query_heads": cfg["n_heads"],
+            "bucket_size": 512,
+            "ring_attn": True,
+            "striped_ring_attn": False,
+            "ring_seq_size": cfg["seq_len"] // world_size,
+            "auto_shard_seq": True,
+            "max_lookback_seq_len": None,
+            "rotary_embed_theta": 10000,
+            "ignore_index": -1,
+            "force_regular_attn": False,
+            "use_cuda_kernel": True,
+        }
     else:
         return Params(
             dim=cfg["hidden_dim"],
@@ -467,7 +511,10 @@ def create_params(args):
             weight_tying=cfg["weight_tying"],
             norm_type=get_norm_class(cfg.get("model_norm", args.model_norm)),
             attn_func=get_attn_func(
-                args.attn_name, args.attn_activation, args.attn_seq_scalar, args.attn_seq_scalar_alpha
+                cfg.get("attn_name", args.attn_name),
+                cfg.get("attn_activation", args.attn_activation),
+                cfg.get("attn_seq_scalar", args.attn_seq_scalar),
+                cfg.get("attn_seq_scalar_alpha", args.attn_seq_scalar_alpha),
             ),
             apply_qk_norm=cfg.get("qk_norm", args.qk_norm),
             positional_embedding_type=cfg.get("positional_embedding_type", args.positional_embedding_type),
@@ -508,7 +555,8 @@ class Mamba(nn.Module):
 def create_model(args):
     if "mamba" in args.model:
         model = Mamba(create_params(args))
-        return model
+    elif "ring" in args.model:
+        model = RingTransformer(**create_params(args))
     else:
         model = Transformer(create_params(args))
-        return model
+    return model

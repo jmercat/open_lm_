@@ -187,9 +187,6 @@ def custom_attn(
 
     return torch.einsum("bhqk,bkhd->bqhd", attn_weight, values)
 
-def wrapper_ring_attention(ring_attn_fn, queries, keys, values, is_causal, attention_mask=None, **kwargs):
-    return ring_attn_fn(q=queries, k=keys, v=values, causal=is_causal, mask=attention_mask, **kwargs)
-
 
 def get_attn_func(
     attn_name,

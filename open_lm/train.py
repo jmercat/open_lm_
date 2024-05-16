@@ -123,7 +123,10 @@ def train_one_epoch(
         if args.accum_freq == 1:
             with autocast():
                 inputs, targets = sample_chunk(texts, args)
-                out, _, _ = model(inputs)
+                if "open_lm" in args.model or "openlm" in args.model:
+                    out, _, _ = model(inputs)
+                else:
+                    out = model(inputs)
 
                 if args.log_logit_mean:
                     logit_m.update(torch.mean(out).item())
@@ -140,7 +143,10 @@ def train_one_epoch(
                 with autocast():
                     for key, averager in averagers.avgs_dict.items():
                         with torch.no_grad():
-                            out_avg, _, _ = averager.av_model(inputs)
+                            if "open_lm" in args.model or "openlm" in args.model:
+                                out, _, _ = model(inputs)
+                            else:
+                                out = model(inputs)
                             # save the loss for the average model for logging
                             total_loss_avg[key] = loss(out_avg.reshape(-1, args.vocab_size), targets.reshape(-1))
         else:
@@ -162,7 +168,10 @@ def train_one_epoch(
                         if inputs_ii.shape[0] == 0:
                             break
                         targets_ii = targets[ii * per_batch : (ii + 1) * per_batch]
-                        out, _, _ = model(inputs_ii)
+                        if "open_lm" in args.model or "openlm" in args.model:
+                            out, _, _ = model(inputs)
+                        else:
+                            out = model(inputs)
 
                         if args.log_logit_mean:
                             logit_m.update(torch.mean(out).item())

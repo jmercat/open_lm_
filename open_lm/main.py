@@ -474,8 +474,11 @@ def main(args):
         with torch.device("meta" if args.experimental_meta_device and args.fsdp else args.device):
             model = create_model(args)
 
-    args.vocab_size = model.vocab_size
-    args.seq_len = model.seq_len
+    try:
+        args.vocab_size = model.vocab_size
+        args.seq_len = model.seq_len
+    except AttributeError:
+        pass
     if args.train_num_samples is not None:
         args.train_num_samples //= args.seq_len
     if args.val_num_samples is not None:
