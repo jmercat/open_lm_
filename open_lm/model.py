@@ -20,6 +20,7 @@ from open_lm.norms import get_norm_class
 from open_lm.positional_embedding.head_rotary import HeadRotaryWithCast
 from open_lm.positional_embedding.rotary import RotaryWithCast
 from open_lm.positional_embedding.llama_rotary import LLaMARotaryWithCast
+from open_lm.positional_embedding.rotary_contextual import RotaryContextualWithCast
 from open_lm.positional_embedding.none import identity_with_cast
 
 # from open_lm.moe.mixture_of_experts import MoE
@@ -100,10 +101,12 @@ class Params:
     ffn_type: str = "swiglu"
 
 
-def get_pos_embed(args: Params):
+def get_pos_embed(args: Params, layer_id: int=0):
     head_dim = args.dim // args.n_heads
     if args.positional_embedding_type == "rotary":
         return RotaryWithCast(head_dim, args.seq_len)
+    elif args.positional_embedding_type == "rotary_contextual":
+        return RotaryContextualWithCast(head_dim, args.seq_len, layer_id=layer_id)
     elif args.positional_embedding_type == "llama_rotary":
         return LLaMARotaryWithCast(head_dim, args.n_heads, args.seq_len)
     elif args.positional_embedding_type == "head_rotary":
@@ -121,7 +124,7 @@ class CustomAttn(nn.Module):
         self.head_dim = args.dim // args.n_heads
         self.in_proj = nn.Linear(args.dim, 3 * args.n_heads * self.head_dim, bias=False)
         self.out_proj = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
-        self.pos_embed = get_pos_embed(args)
+        self.pos_embed = get_pos_embed(args, layer_id)
         self.attn_fn = args.attn_func
         self.apply_qk_norm = args.apply_qk_norm
 

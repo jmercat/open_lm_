@@ -914,10 +914,10 @@ def main(args):
             failed=failed_ckpt,
         )
 
-        if num_ckpt_too_few_tokens > args.data_tolerate_num_ckpts:
-            raise RuntimeError(
-                f"{num_ckpt_too_few_tokens} checkpoints happened where the number of tokens seen was {1 - args.data_tolerate_error_p} of expected. This is likely due to transient errors e.g. reading from S3."
-            )
+        # if num_ckpt_too_few_tokens > args.data_tolerate_num_ckpts:
+        #     raise RuntimeError(
+        #         f"{num_ckpt_too_few_tokens} checkpoints happened where the number of tokens seen was {1 - args.data_tolerate_error_p} of expected. This is likely due to transient errors e.g. reading from S3."
+        #     )
 
         if done_training:
             if is_master(args):

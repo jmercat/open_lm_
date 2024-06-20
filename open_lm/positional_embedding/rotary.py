@@ -39,7 +39,6 @@ class RotaryEmbedding(torch.nn.Module):
     .. _repo: https://github.com/ZhuiyiTechnology/roformer
     .. _GPT-NeoX: https://github.com/EleutherAI/gpt-neox
 
-
     .. warning: Please note that this embedding is not registered on purpose, as it is transformative
         (it does not create the embedding dimension) and will likely be picked up (imported) on a ad-hoc basis
     """
