@@ -2,3 +2,17 @@ venv
 wandb
 logs
 checkpoints
+.git
+.github
+.vscode
+checkpoints
+dist
+eval 
+external
+llama_tokenizer
+logs
+open_lm.egg-info
+plots
+preproc_data
+results
+wandb

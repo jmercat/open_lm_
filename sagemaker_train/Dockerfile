@@ -20,14 +20,19 @@ ENV PATH="/opt/ml/code:${PATH}"
 ENV SAGEMAKER_SUBMIT_DIRECTORY /opt/ml/code
 
 # /opt/ml and all subdirectories are utilized by SageMaker, use the /code subdirectory to store your user code.
-COPY . /opt/ml/code/
-RUN rm /opt/ml/code/setup.py
+COPY ./requirements.txt /opt/ml/code/requirements.txt
 
 RUN pip install -r /opt/ml/code/requirements.txt
-RUN pip uninstall flash-attn -y
-RUN pip install flash-attn>=2.2
+# RUN pip uninstall flash-attn -y
+# RUN pip install flash-attn>=2.2
+# RUN pip install --upgrade transformer-engine
+RUN pip uninstall mamba-ssm
+RUN pip install mamba-ssm --no-cache-dir
+
 # # Prevent sagemaker from installing requirements again.
 # RUN rm /opt/ml/code/setup.py
+COPY ./ /opt/ml/code/
+RUN rm /opt/ml/code/setup.py
 RUN rm /opt/ml/code/requirements.txt
 
 # Defines a script entrypoint 

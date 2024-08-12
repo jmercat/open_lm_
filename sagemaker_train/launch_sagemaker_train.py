@@ -97,6 +97,8 @@ def main():
     parser.add_argument("--instance-count", default=1, type=int, help="Number of instances")
     parser.add_argument("--instance-type", default="p4de", choices=list(INSTANCE_MAPPER.keys()))
     parser.add_argument("--spot-instance", action="store_true")
+    parser.add_argument("--pool-capacity", action="store_true")
+
 
     args = parser.parse_args()
     main_after_setup_move(args)
@@ -167,6 +169,13 @@ def main_after_setup_move(args):
     output_root = f"{args.s3_remote_sync}/sagemaker/{args.user}/{NAME}/"
     output_s3 = os.path.join(output_root, job_name)
 
+    environment = {
+        "HF_HOME": "/tmp/.cache/huggingface/",
+        "HF_DATASETS_CACHE": "/tmp/.cache/huggingface/datasets",
+        "NCCL_DEBUG_FILE": f"/opt/ml/output/data/NCCL/{job_name}/debug.log",
+        "SM_USE_RESERVED_CAPACITY": "0" if args.pool_capacity else "1",
+        "PYTORCH_KERNEL_CACHE_PATH": "/tmp/.cache/torch/kernels/",
+    }
     estimator = PyTorch(
         entry_point="open_lm/main.py",
         sagemaker_session=sagemaker_session,
@@ -189,8 +198,12 @@ def main_after_setup_move(args):
         max_wait=5 * 24 * 60 * 60 if args.spot_instance else None,
         input_mode="FastFile",
         # environment={"TORCH_DISTRIBUTED_DEBUG": "DETAIL", "TORCH_CPP_LOG_LEVEL": "INFO"},
-        environment={"SM_USE_RESERVED_CAPACITY": "1"},
+        environment=environment,
         keep_alive_period_in_seconds=30 * 60 if not args.spot_instance else None,  # 30 minutes
+        tags=[
+            {"Key": "tri.project", "Value": "MM:PJ-0077"},
+            {"Key": "tri.owner.email", "Value": f"{args.user}@tri.global"},
+        ],
     )
 
     estimator.fit()

@@ -1,5 +1,5 @@
 {
-    "d_model": 2048,
+    "d_model": 1024,
     "n_layer": 48,
     "vocab_size": 50432,
     "seq_len": 2048,
