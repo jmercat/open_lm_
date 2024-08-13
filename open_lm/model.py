@@ -28,7 +28,7 @@ except ImportError:
     MoE = None
     MoEArgs = None
 
-try
+try:
     from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel, MixerModel
     from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn, rms_norm_fn
 except ImportError:

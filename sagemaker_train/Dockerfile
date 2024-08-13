@@ -28,6 +28,8 @@ RUN pip install -r /opt/ml/code/requirements.txt
 # RUN pip install --upgrade transformer-engine
 RUN pip uninstall mamba-ssm
 RUN pip install mamba-ssm --no-cache-dir
+RUN pip uninstall causal_conv1d
+RUN pip install causal_conv1d --no-cache-dir
 
 # # Prevent sagemaker from installing requirements again.
 # RUN rm /opt/ml/code/setup.py
