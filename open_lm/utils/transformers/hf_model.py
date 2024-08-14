@@ -134,6 +134,7 @@ class OpenLMforCausalLM(OpenLMModel):
             use_cache=use_cache,
             attention_mask=attention_mask,
         )
+
         loss = None
         if labels is not None:
             shift_logits = logits[..., :-1, :].contiguous()
@@ -151,6 +152,7 @@ class OpenLMforCausalLM(OpenLMModel):
                 loss = loss_fct(shift_logits, shift_labels)
 
         output = CausalLMOutputWithPast(logits=logits, past_key_values=past_key_values, loss=loss)
+
         return output
 
     def prepare_inputs_for_generation(
