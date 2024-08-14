@@ -28,11 +28,9 @@ except ImportError:
     MoE = None
     MoEArgs = None
 
-try:
-    from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel, MixerModel
-    from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn, rms_norm_fn
-except ImportError:
-    MambaLMHeadModel = None
+from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel, MixerModel
+from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn, rms_norm_fn
+
 
 # from openclip
 _MODEL_CONFIG_PATHS = [Path(__file__).parent / f"model_configs/"]
@@ -572,8 +570,8 @@ if MambaLMHeadModel is not None:
             return
 
         def forward(self, input_ids, inputs_embeds=None, inference_params=None, **kwargs):
-            logits = self.model(input_ids, inputs_embeds, inference_params, **kwargs).logits
-            return logits, None, None
+            logits, hidden_state, inference_params = self.model(input_ids, inputs_embeds, inference_params, **kwargs)
+            return logits, hidden_state, inference_params
 else:
 
     class Mamba(nn.Module):
