@@ -1,6 +1,6 @@
 # TORCH_DISTRIBUTED_DEBUG="DETAIL" torchrun --nproc-per-node 3 -m open_lm.main \
 # TORCH_LOGS="+dynamo" TORCHDYNAMO_VERBOSE=1 \
-CUDA_VISIBLE_DEVICE=1 CUDA_LAUNCH_BLOCKING=1 python open_lm/main.py \
+TORCHINDUCTOR_VERBOSE=1 CUDA_VISIBLE_DEVICE=1 CUDA_LAUNCH_BLOCKING=1 python open_lm/main.py \
  --model open_lm_tiny_flex.json \
  --dataset-manifest "s3://tri-ml-datasets/openlm/dcnlp/datasets/tri-hero-run1_cc_v4_resiliparse_rw_v2_bff_minngram13_10shards_all_fasttext_OH_eli5_vs_rw_v2_bigram_200k_train_0.11-starcoder-math_datasets/manifest.jsonl" \
  --data-key "json.gz" \
@@ -23,6 +23,8 @@ CUDA_VISIBLE_DEVICE=1 CUDA_LAUNCH_BLOCKING=1 python open_lm/main.py \
  --resume latest \
  --logs logs \
  --z-loss-coefficient 1e-4 \
- --torchcompile
+#  --attn-prefix-length 128 \
+#  --torchcompile 
+
 
     

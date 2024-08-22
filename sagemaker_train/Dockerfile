@@ -20,14 +20,20 @@ ENV PATH="/opt/ml/code:${PATH}"
 ENV SAGEMAKER_SUBMIT_DIRECTORY /opt/ml/code
 
 # /opt/ml and all subdirectories are utilized by SageMaker, use the /code subdirectory to store your user code.
-COPY . /opt/ml/code/
-RUN rm /opt/ml/code/setup.py
+COPY ./requirements.txt /opt/ml/code/requirements.txt
+# remove the setup.py file to prevent sagemaker from installing requirements again do not fail if the file does not exist
+RUN rm /opt/ml/code/setup.py || true
 
 RUN pip install -r /opt/ml/code/requirements.txt
 RUN pip uninstall flash-attn -y
 RUN pip install flash-attn>=2.2
+RUN pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121 --force-reinstall
+RUN pip uninstall triton -y
+RUN git clone https://github.com/triton-lang/triton.git
+RUN cd triton && pip install -e python
 # # Prevent sagemaker from installing requirements again.
 # RUN rm /opt/ml/code/setup.py
+COPY . /opt/ml/code/
 RUN rm /opt/ml/code/requirements.txt
 
 # Defines a script entrypoint 
