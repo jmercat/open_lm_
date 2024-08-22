@@ -2,7 +2,12 @@ from functools import partial
 
 import torch
 from torch.nn import functional as F
+from torch.nn.attention.flex_attention import flex_attention, create_block_mask, or_masks, BlockMask
+from functools import lru_cache
 
+def create_block_mask_cached(score_mod, B, H, M, N, device="cuda"):
+    block_mask = create_block_mask(score_mod, B, H, M, N, device=device)
+    return block_mask
 
 def get_rectangular_causal_mask(shape, q_seq_len, k_seq_len, device, dtype):
     """Create a rectangular causal mask.
@@ -60,6 +65,18 @@ def apply_attention_mask_(bias, attention_mask, queries_dtype):
     # See https://github.com/huggingface/transformers/blob/f738ab3b5d30e30c43a4c3d00ca8939f8a4d4427/src/transformers/modeling_attn_mask_utils.py#L189
     # for details.
     bias.mul_(~torch.all(bias == min_dtype, dim=-1, keepdim=True))
+
+
+def no_mask(b, h, q_idx, kv_idx):
+    return True
+
+
+def causal_mask(b, h, q_idx, kv_idx):
+    return kv_idx <= q_idx
+
+
+def flex_attn(queries, keys, values, is_causal, attention_mask):
+    return flex_attention(queries.transpose(1, 2).contiguous(), keys.transpose(1, 2).contiguous(), values.transpose(1, 2).contiguous(), block_mask=attention_mask).transpose(1, 2).contiguous()
 
 
 def torch_attn(queries, keys, values, is_causal, attention_mask=None):
@@ -173,6 +190,8 @@ def get_attn_func(
         return torch_attn
     elif attn_name == "torch_attn":
         return torch_attn
+    elif attn_name == "flex_attn":
+        return flex_attn
     elif attn_name == "custom_attn":
         assert (
             attn_activation is not None and attn_seq_scalar is not None and alpha is not None

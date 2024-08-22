@@ -68,7 +68,6 @@ from open_lm.file_utils import (
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
 
-
 def random_seed(seed=42, rank=0):
     torch.manual_seed(seed + rank)
     np.random.seed(seed + rank)
@@ -308,7 +307,6 @@ def cleanup(sync_process, distributed=False):
         terminate_sync_process(sync_process)
     if distributed and torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
-
 
 def main(args):
     args = parse_args(args)

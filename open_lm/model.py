@@ -13,7 +13,7 @@ from torch.utils.checkpoint import checkpoint
 
 from huggingface_hub import PyTorchModelHubMixin
 
-from open_lm.attention import get_attn_func, torch_attn
+from open_lm.attention import get_attn_func, torch_attn, no_mask, causal_mask, or_masks, create_block_mask_cached, BlockMask
 from open_lm.norms import get_norm_class
 from open_lm.positional_embedding.head_rotary import HeadRotaryWithCast
 from open_lm.positional_embedding.rotary import RotaryWithCast
@@ -90,6 +90,7 @@ class Params:
     weight_tying: bool = False
     model_norm: nn.Module = nn.LayerNorm
     attn_func: Callable = torch_attn
+    attention_mask: BlockMask = None
     apply_qk_norm: bool = False
     moe_loss_weight: float = 0.1
     moe_capacity_factor: float = 1.25
@@ -141,6 +142,7 @@ class CustomAttn(nn.Module):
         self.pos_embed = get_pos_embed(args)
         self.attn_fn = args.attn_func
         self.apply_qk_norm = args.apply_qk_norm
+        self.attention_mask = args.attention_mask
 
         # initialize norm layers for queries and keys if needed
         self.q_norm = (
@@ -347,6 +349,7 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
         super().__init__()
         # for convenience we often share param names with llama
         self.params = params
+        self.attention_mask = params.attention_mask
         self.dim = params.dim
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
@@ -406,6 +409,9 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
                 attended to. attention_mask[s, i] = False indicates that token i should not be attended to by any other
                 token for sequence s.
         """
+        if self.attention_mask is not None:
+            assert attention_mask is None, "Cannot pass attention_mask if it is already set in the model."
+            attention_mask = self.attention_mask
         if input_ids is not None:
             x = self.tok_embeddings(input_ids)
         elif inputs_embeds is not None:
@@ -470,6 +476,18 @@ def create_params(args):
             weight_tying=cfg.get("weight_tying", False),
         )
     else:
+        prefix_length = cfg.get("attn_prefix_length", args.attn_prefix_length)
+        attention_mask = None
+        if cfg.get("attn_name", args.attn_name) == "flex_attn":
+            if prefix_length is not None:
+                def prefix_mask(b, h, q_idx, kv_idx):
+                    return kv_idx <= prefix_length
+                mask_mod = prefix_mask
+            else:
+                mask_mod = no_mask
+            causal_mask_mod = or_masks(causal_mask, mask_mod)
+            attention_mask = create_block_mask_cached(causal_mask_mod, args.global_batch_size, cfg["n_heads"], cfg["seq_len"], cfg["seq_len"])
+
         return Params(
             dim=cfg["hidden_dim"],
             n_layers=cfg["n_layers"],
@@ -480,8 +498,12 @@ def create_params(args):
             weight_tying=cfg["weight_tying"],
             model_norm=get_norm_class(cfg.get("model_norm", args.model_norm)),
             attn_func=get_attn_func(
-                args.attn_name, args.attn_activation, args.attn_seq_scalar, args.attn_seq_scalar_alpha
+                cfg.get("attn_name", args.attn_name),
+                cfg.get("attn_activation", args.attn_activation),
+                cfg.get("attn_seq_scalar", args.attn_seq_scalar),
+                cfg.get("attn_seq_scalar_alpha", args.attn_seq_scalar_alpha),
             ),
+            attention_mask=attention_mask,
             apply_qk_norm=cfg.get("qk_norm", args.qk_norm),
             positional_embedding_type=cfg.get("positional_embedding_type", args.positional_embedding_type),
             ffn_type=cfg.get("ffn_type", args.ffn_type),

@@ -35,7 +35,10 @@ def create_model_config_from_pretrained_config(config: OpenLMConfig):
         model_config.model_norm = get_norm_class(config.model_norm)
 
     if hasattr(config, "attn_name"):
-        model_config.attn_func = get_attn_func(config.attn_name)
+        if hasattr(config, "attn_prefix_length"):
+            model_config.attn_func = get_attn_func(config.attn_name, prefix_length=config.attn_prefix_length)
+        else:
+            model_config.attn_func = get_attn_func(config.attn_name)
 
     return model_config
 

@@ -106,7 +106,7 @@ def add_model_args(parser):
         "--attn-name",
         type=str,
         default="auto",
-        choices=["auto", "torch_attn", "custom_attn"],
+        choices=["auto", "flex_attn", "torch_attn", "custom_attn"],
         help="type of attention to use",
     )
     parser.add_argument(
@@ -129,7 +129,12 @@ def add_model_args(parser):
         default=None,
         help="power alpha to raise L to, where L^alpha divides attention logits post activation",
     )
-
+    parser.add_argument(
+        "--attn-prefix-length",
+        type=int,
+        default=None,
+        help="prefix length over which unmasked attention is used before switching to causal attention",
+    )
 
 def check_replacement_type(replacement, original):
     """Checks that `replacement`, which is intended to replace `original` is of
