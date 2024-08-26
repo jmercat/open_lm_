@@ -2,9 +2,9 @@ import torch
 from torch.nn import functional as F
 from functools import partial
 
-from open_lm.attention import flex_attn, causal_mask, create_block_mask_cached
-from open_lm.model import SwiGLUTorch
+from open_lm.attention import flex_attn, causal_mask, create_block_mask_cached, offset_wrapper, no_mask
 from open_lm.precision import get_autocast
+from open_lm.model import SwiGLUTorch
 from xformers.ops import SwiGLU
 
 
@@ -167,7 +167,7 @@ def custom_attn(
     return torch.einsum("bhqk,bkhd->bqhd", attn_weight, values)
 
 
-def test_custom_attn_matches_softmax_attn(threshold=1e-1):
+def test_custom_attn_matches_softmax_attn(threshold=1e-3):
     for bs, q_seq_len, k_seq_len, h, d in [
         [10, 1024, 2048, 8, 128],
         [10, 2048, 1024, 8, 128],
@@ -181,22 +181,22 @@ def test_custom_attn_matches_softmax_attn(threshold=1e-1):
         for is_causal in [True, False]:
             torch_out = torch_attn(queries.cpu(), keys.cpu(), values.cpu(), is_causal=is_causal)
             if is_causal:
-                block_causal_mask = create_block_mask_cached(causal_mask, bs, h, q_seq_len, k_seq_len)
+                mask = offset_wrapper(causal_mask, max(k_seq_len - q_seq_len, 0))
             else:
-                block_causal_mask = None
-            my_out = flex_attn(queries.cpu(), keys.cpu(), values.cpu(), block_causal_mask)
+                mask = no_mask
+            block_mask = create_block_mask_cached(mask, queries.size(0), queries.size(1), queries.size(2), keys.size(2), BLOCK_SIZE=16)
+            my_out = flex_attn(queries.cpu(), keys.cpu(), values.cpu(), block_mask, BLOCK_SIZE=16)
 
             if torch.cuda.is_available():
                 torch_out = torch_attn(queries.cuda(), keys.cuda(), values.cuda(), is_causal=is_causal)
-                my_out = flex_attn(queries.cuda(), keys.cuda(), values.cuda(), block_causal_mask)
-
+                my_out = flex_attn(queries.cuda(), keys.cuda(), values.cuda(), block_mask, BLOCK_SIZE=16)
                 assert torch.allclose(
-                    torch_out, my_out, atol=threshold, rtol=threshold
-                ), "custom_attn incorrectly implements softmax attention"
+                    torch_out, my_out, rtol=threshold
+                ), f"flex_attn incorrectly implements softmax attention diff={(torch_out - my_out).norm()}"
 
             assert torch.allclose(
-                torch_out, my_out, atol=threshold, rtol=threshold
-            ), "custom_attn incorrectly implements softmax attention"
+                torch_out, my_out, rtol=threshold
+            ), f"flex_attn incorrectly implements softmax attention diff={(torch_out - my_out).norm()}"
 
 
 def test_no_failure():
@@ -213,10 +213,12 @@ def test_no_failure():
 
                 for is_causal in [True, False]:
                     if is_causal:
-                        block_causal_mask = create_block_mask_cached(causal_mask, bs, h, q_seq_len, k_seq_len)
+                        block_mask = create_block_mask_cached(
+                            causal_mask, queries.size(0), queries.size(1), queries.size(2), keys.size(2)
+                        )
+                        my_out = flex_attn(queries, keys, values, block_mask)
                     else:
-                        block_causal_mask = None
-                    my_out = flex_attn(queries, keys, values, block_causal_mask)
+                        my_out = flex_attn(queries, keys, values, None)
 
     assert True
 

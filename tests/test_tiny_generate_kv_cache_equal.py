@@ -27,14 +27,7 @@ def args():
             "model_norm": "default_layer_norm",
             "qk_norm": False,
             "positional_embedding_type": "rotary",
-            "ffn_type": "swiglu",
-            "moe_num_experts": None,
-            "moe_freq": 0,
-            "moe_weight_parallelism": False,
-            "moe_expert_model_parallelism": False,
-            "moe_capacity_factor": 1.25,
-            "moe_loss_weight": 0.1,
-            "moe_top_k": 2,
+            "ffn_type": "swiglu_torch",
         }
     )
     return args
@@ -82,3 +75,32 @@ def test_tiny_generate_kv_cache(tiny_open_lm, tiny_tokenizer, args, wiki_page, c
 
     # Check that the results are the same as without cache
     assert result_no_cache1 == result_with_cache
+
+
+if __name__ == "__main__":
+    args = MockTrainArgs(
+        model="open_lm_test_tiny",
+        **{
+            # Generation params:
+            "input_text": "random",
+            "max_gen_len": None,
+            "context_len": None,
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "use_cache": False,
+            "num_beams": 1,
+            # Model params that might not be in config:
+            "model_norm": "default_layer_norm",
+            "qk_norm": False,
+            "positional_embedding_type": "rotary",
+            "ffn_type": "swiglu_torch",
+        }
+    )
+    tiny_open_lm = OpenLMforCausalLM(OpenLMConfig(create_params(args)))
+    tiny_open_lm.model.eval()
+    tiny_tokenizer = CharacterTokenizer(["a", "b", "c", "d", "e", "f", "g", "h", "i"])
+    wiki_page = "Soil steam sterilization"
+    context_len = 4
+    max_gen_len = 4
+    num_beams = 1
+    test_tiny_generate_kv_cache(tiny_open_lm, tiny_tokenizer, args, wiki_page, context_len, max_gen_len, num_beams)

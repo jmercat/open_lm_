@@ -216,7 +216,7 @@ def save_checkpoint(
     failed=False,
 ):
     cpu_state, optim_state = None, None
-    if args.logs and args.logs.lower() != "none" and args.fsdp:
+    if args.logs_dir and args.logs_dir.lower() != "none" and args.fsdp:
         save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
         with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
             cpu_state = model.state_dict()
@@ -367,7 +367,7 @@ def main(args):
         )
 
     resume_latest = args.resume == "latest"
-    log_base_path = os.path.join(args.logs, args.name)
+    log_base_path = os.path.join(args.logs_dir, args.name)
     args.log_path = None
     if is_master(args, local=args.log_local):
         os.makedirs(log_base_path, exist_ok=True)
@@ -432,7 +432,7 @@ def main(args):
         # first make sure it works
         result = remote_sync_with_expon_backoff(
             args.remote_sync_frequency,
-            os.path.join(args.logs, args.name),
+            os.path.join(args.logs_dir, args.name),
             os.path.join(args.remote_sync, args.name),
             args.remote_sync_protocol,
         )
@@ -443,7 +443,7 @@ def main(args):
         # if all looks good, start a process to do this every args.remote_sync_frequency seconds
         remote_sync_process = start_sync_process(
             args.remote_sync_frequency,
-            os.path.join(args.logs, args.name),
+            os.path.join(args.logs_dir, args.name),
             os.path.join(args.remote_sync, args.name),
             args.remote_sync_protocol,
         )
@@ -581,7 +581,7 @@ def main(args):
         logging.info(f"Model (has {sum(p.numel() for p in model.parameters() if p.requires_grad)} parameters):")
         logging.info(f"{str(model)}")
         logging.info("Params:")
-        params_file = os.path.join(args.logs, args.name, "params.txt")
+        params_file = os.path.join(args.logs_dir, args.name, "params.txt")
         with open(params_file, "w") as f:
             for name in sorted(vars(args)):
                 val = getattr(args, name)
@@ -739,7 +739,7 @@ def main(args):
             raise ValueError(f"Unknown scheduler, {args.lr_scheduler}. Available options are: cosine, const.")
 
     # determine if this worker should save logs and checkpoints. only do so if it is rank == 0
-    args.save_logs = args.logs and args.logs.lower() != "none" and is_master(args)
+    args.save_logs = args.logs_dir and args.logs_dir.lower() != "none" and is_master(args)
     writer = None
     if args.save_logs and args.tensorboard:
         assert tensorboard is not None, "Please install tensorboard."
@@ -955,7 +955,7 @@ def main(args):
         terminate_sync_process(remote_sync_process)
         result = remote_sync_with_expon_backoff(
             args.remote_sync_frequency,
-            os.path.join(args.logs, args.name),
+            os.path.join(args.logs_dir, args.name),
             os.path.join(args.remote_sync, args.name),
             args.remote_sync_protocol,
         )
@@ -975,7 +975,7 @@ def main(args):
 def copy_codebase(args):
     from shutil import copytree, ignore_patterns
 
-    new_code_path = os.path.join(args.logs, args.name, "code")
+    new_code_path = os.path.join(args.logs_dir, args.name, "code")
     if os.path.exists(new_code_path):
         print(f"Error. Experiment already exists at {new_code_path}. Use --name to specify a new experiment.")
         return -1

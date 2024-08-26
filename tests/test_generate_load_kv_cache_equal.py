@@ -42,13 +42,6 @@ def args():
             "qk_norm": False,
             "positional_embedding_type": "head_rotary",
             "ffn_type": "swiglu",
-            "moe_num_experts": None,
-            "moe_freq": 0,
-            "moe_weight_parallelism": False,
-            "moe_expert_model_parallelism": False,
-            "moe_capacity_factor": 1.25,
-            "moe_loss_weight": 0.1,
-            "moe_top_k": 2,
             "num_beams": 1,
         }
     )
@@ -75,6 +68,7 @@ def open_lm(args):
         checkpoint = torch.load(args.checkpoint)
         state_dict = checkpoint["state_dict"]
         state_dict = {x.replace("module.", ""): y for x, y in state_dict.items()}
+        state_dict = {k: v for k, v in state_dict.items() if "pos_embed.inv_freq" not in k}
         open_lm.model.load_state_dict(state_dict)
 
     open_lm.model.eval()

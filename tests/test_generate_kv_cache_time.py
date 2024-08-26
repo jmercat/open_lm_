@@ -1,6 +1,6 @@
 import time
 import pytest
-
+import torch
 from transformers import GPTNeoXTokenizerFast
 
 from open_lm.utils.transformers.hf_model import OpenLMforCausalLM
@@ -31,14 +31,7 @@ def test_generate_kv_cache(wiki_page, context_len, max_gen_len):
             "model_norm": "gain_only_layer_norm",
             "qk_norm": False,
             "positional_embedding_type": "rotary",
-            "ffn_type": "swiglu",
-            "moe_num_experts": None,
-            "moe_freq": 0,
-            "moe_weight_parallelism": False,
-            "moe_expert_model_parallelism": False,
-            "moe_capacity_factor": 1.25,
-            "moe_loss_weight": 0.1,
-            "moe_top_k": 2,
+            "ffn_type": "swiglu_torch",
             "num_beams": 1,
         }
     )
@@ -48,6 +41,7 @@ def test_generate_kv_cache(wiki_page, context_len, max_gen_len):
     tokenizer = GPTNeoXTokenizerFast.from_pretrained("EleutherAI/gpt-neox-20b")
 
     open_lm.model.eval()
+    # open_lm.model = torch.compile(open_lm.model)
 
     start_time = time.time()
     args.use_cache = False

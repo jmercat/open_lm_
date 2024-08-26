@@ -28,7 +28,7 @@ torchrun --nproc-per-node 8 -m open_lm.main \
     --wandb-project-name lmtune \
     --pretrained /fsx/home-mitchellw/experimetns/lm/1p5T-bigdata-neox-g3b_neox-10-1e-3-0.1-nodes48-bs10-v0/checkpoints/epoch_24.pt \
     --name instruction-tune-3b-2e-5-6 \
-    --logs /fsx/home-mitchellw/experimetns/lmtune
+    --logs-dir /fsx/home-mitchellw/experimetns/lmtune
 ```
 
 Now we want to interpolate between the base and fine-tuned model with different coefficients alpha. We can do so with this bash script.
@@ -66,7 +66,7 @@ do
             --name $RANDOM \
             --average $BASEMODEL $FINALMODEL \
             --average-coefficients $alpha $(echo "1-$alpha" | bc -l) \
-            --logs /fsx/home-mitchellw/experimetns/lmdebug  > $save_path_1
+            --logs-dir /fsx/home-mitchellw/experimetns/lmdebug  > $save_path_1
 
         # now do the base eval
         torchrun --nproc-per-node 4 -m open_lm.main \
@@ -83,7 +83,7 @@ do
             --name $RANDOM \
             --average $BASEMODEL $FINALMODEL \
             --average-coefficients $alpha $(echo "1-$alpha" | bc -l) \
-            --logs /fsx/home-mitchellw/experimetns/lmdebug  > $save_path_2
+            --logs-dir /fsx/home-mitchellw/experimetns/lmdebug  > $save_path_2
     fi
 done
 ```

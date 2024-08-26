@@ -101,7 +101,7 @@ An example training run can be called as follows:
  --wandb-project-name open_lm_example \
  --name open_lm_ex_$RANDOM \
  --resume latest \
- --logs path/to/logging/dir/
+ --logs-dir path/to/logging/dir/
 ```
 Checkpoints and final model weights will be saved to the specified logs directory.
 
@@ -133,7 +133,7 @@ This will create a file called ```manifest.jsonl``` under ```/preproc_data```. T
  --wandb-project-name open_lm_example \
  --name open_lm_ex_$RANDOM \
  --resume latest \
- --logs path/to/logging/dir/
+ --logs-dir path/to/logging/dir/
 ```
 
 ### Dataset manifest

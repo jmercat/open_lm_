@@ -3,7 +3,7 @@ from torch.utils.checkpoint import checkpoint
 from transformers import PreTrainedModel
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from open_lm.utils.transformers.hf_config import OpenLMConfig
-from open_lm.model import Transformer, create_params, Params, MambaParams, Mamba
+from open_lm.model import Transformer, create_params, Params
 import torch
 import torch.nn as nn
 from typing import Union, Tuple, Optional, List
@@ -35,10 +35,7 @@ class OpenLMModel(PreTrainedModel):
         super().__init__(config)
 
         self.supports_gradient_checkpointing = True
-        if isinstance(params, Params):
-            self.model = Transformer(params)
-        elif isinstance(params, MambaParams):
-            self.model = Mamba(params)
+        self.model = Transformer(params)
 
     @property
     def gradient_checkpointing(self):
@@ -62,16 +59,10 @@ class OpenLMforCausalLM(OpenLMModel):
         self.post_init()
 
     def get_input_embeddings(self):
-        if isinstance(self.model, Mamba):
-            return self.model.model.backbone.embedding
-        else:
-            return self.model.tok_embeddings
+        return self.model.tok_embeddings
 
     def set_input_embeddings(self, value):
-        if isinstance(self.model, Mamba):
-            self.model.model.backbone.embedding = value
-        else:
-            self.model.tok_embeddings = value
+        self.model.tok_embeddings = value
 
     def get_output_embeddings(self):
         return self.model.get_output_embeddings()
@@ -124,6 +115,8 @@ class OpenLMforCausalLM(OpenLMModel):
             # The masking can be done on the loss only
             loss_mask = attention_mask
             attention_mask = None
+        elif attention_mask is not None:
+            raise ValueError("Attention mask is not supported")
         else:
             loss_mask = None
 
@@ -132,7 +125,6 @@ class OpenLMforCausalLM(OpenLMModel):
             inputs_embeds=inputs_embeds,
             past_key_values=past_key_values,
             use_cache=use_cache,
-            attention_mask=attention_mask,
         )
         loss = None
         if labels is not None:
@@ -177,8 +169,7 @@ class OpenLMforCausalLM(OpenLMModel):
         model_inputs.update(
             {
                 "past_key_values": past_key_values,
-                "use_cache": kwargs.get("use_cache"),
-                "attention_mask": attention_mask,
+                "use_cache": kwargs.get("use_cache")
             }
         )
         return model_inputs

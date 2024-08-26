@@ -14,26 +14,12 @@ from torch.utils.checkpoint import checkpoint
 
 from huggingface_hub import PyTorchModelHubMixin
 
-from open_lm.attention import flex_attn, causal_mask, create_block_mask_cached, prefix_mask, prefix_causal_mask
+from open_lm.attention import flex_attn, causal_mask, prefix_wrapper, create_block_mask_cached, _DEFAULT_SPARSE_BLOCK_SIZE, prefix_causal_mask
 from open_lm.norms import get_norm_class
 from open_lm.positional_embedding.head_rotary import HeadRotaryWithCast
 from open_lm.positional_embedding.rotary import RotaryWithCast
 from open_lm.positional_embedding.llama_rotary import LLaMARotaryWithCast
 from open_lm.positional_embedding.none import identity_with_cast
-
-# # from open_lm.moe.mixture_of_experts import MoE
-# try:
-#     from megablocks.layers.moe import MoE
-#     from megablocks.layers.arguments import Arguments as MoEArgs
-# except ImportError:
-MoE = None
-MoEArgs = None
-
-# try:  # optional import
-#     from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel, MixerModel
-#     from mamba_ssm.ops.triton.layernorm import RMSNorm, layer_norm_fn, rms_norm_fn
-# except ImportError:
-MambaLMHeadModel = None
 
 # from openclip
 _MODEL_CONFIG_PATHS = [Path(__file__).parent / f"model_configs/"]
@@ -90,15 +76,7 @@ class Params:
     post_embed_norm: bool = False
     weight_tying: bool = False
     model_norm: nn.Module = nn.LayerNorm
-    attn_prefix_length: int = 0
     apply_qk_norm: bool = False
-    moe_loss_weight: float = 0.1
-    moe_capacity_factor: float = 1.25
-    moe_expert_model_parallelism: bool = False
-    moe_weight_parallelism: bool = False
-    moe_num_experts: int = 8
-    moe_top_k: int = 2
-    moe_freq: int = 0
     positional_embedding_type: str = "rotary"
     ffn_type: str = "swiglu"
 
@@ -130,11 +108,6 @@ def get_pos_embed(args: Params):
         return identity_with_cast
     else:
         raise RuntimeError(f"Unknown positional embedding type {args.positional_embedding_type}")
-
-
-def causal_mask(b, h, q_idx, kv_idx):
-    return kv_idx <= q_idx
-
 
 class CustomAttn(nn.Module):
     def __init__(self, layer_id, args: Params):
@@ -198,13 +171,13 @@ class CustomAttn(nn.Module):
         if use_cache:
             past_key_value = [keys, vals]
 
-        attention_mask = create_block_mask_cached(mask_function, batchsize, self.n_heads, q_len, q_len + past_length, device=x.device)
+        block_mask = create_block_mask_cached(mask_function, batchsize, self.n_heads, queries.size(1), keys.size(1), device=x.device)
 
         output = self.attn_fct(
             queries=queries,
             keys=keys,
             values=vals,
-            attention_mask=attention_mask,
+            block_mask=block_mask,
         )
 
         output = output.view(batchsize, q_len, -1)
@@ -286,21 +259,6 @@ class Block(nn.Module):
             # this follows llama / lit llama -- go to multiple of 256
             self.hidden_dim = 256 * ((int(2 * 4 * args.dim / 3) + 256 - 1) // 256)
             self.feed_forward = GemmaMLP(args.dim, self.hidden_dim, layer_id)
-        elif args.ffn_type == "moe":
-            moe_args = MoEArgs(
-                hidden_size=args.dim,
-                ffn_hidden_size=args.dim * 4,
-                moe_num_experts=args.moe_num_experts,
-                moe_weight_parallelism=args.moe_weight_parallelism,
-                moe_expert_model_parallelism=args.moe_expert_model_parallelism,
-                moe_top_k=args.moe_top_k,
-                moe_capacity_factor=args.moe_capacity_factor,
-                moe_loss_weight=args.moe_loss_weight,
-                device=torch.cuda.current_device(),
-                bf16=False,
-                fp16=False,
-            )
-            self.feed_forward = MoE(moe_args)
 
         self.layer_id = layer_id
         self.attention_norm = args.model_norm(
@@ -339,10 +297,7 @@ class Block(nn.Module):
             mask_function=mask_function,
         )
         h = x + h
-        if self._ffn_type == "moe":
-            ffn_out, _ = self.feed_forward(self.ffn_norm(h))
-        else:
-            ffn_out = self.feed_forward(self.ffn_norm(h))
+        ffn_out = self.feed_forward(self.ffn_norm(h))
         out = h + ffn_out
         return out, past_key_value
 
@@ -355,7 +310,6 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
         self.dim = params.dim
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
-        self.moe_num_experts = params.moe_num_experts
         self.seq_len = params.seq_len
         self.post_embed_norm = (
             params.model_norm(
@@ -366,17 +320,13 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
             else nn.Identity()
         )
         self.weight_tying = params.weight_tying
-        self.attn_prefix_length = params.attn_prefix_length
 
         self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
 
         self.layers = torch.nn.ModuleList()
         ffn_type_ = params.ffn_type
         for layer_id in range(params.n_layers):
-            if params.moe_freq > 0 and layer_id % params.moe_freq == 0:
-                params.ffn_type = "moe"
-            else:
-                params.ffn_type = ffn_type_
+            params.ffn_type = ffn_type_
             self.layers.append(Block(layer_id, params))
 
         # get class for normalization layers
@@ -402,7 +352,7 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
     def set_grad_checkpointing(self, enable=True):
         self.grad_checkpointing = enable
 
-    def forward(self, input_ids=None, inputs_embeds=None, past_key_values=None, use_cache=False):
+    def forward(self, input_ids=None, inputs_embeds=None, past_key_values=None, use_cache=False, attn_prefix_length=0):
         """
         Args:
             input
@@ -416,9 +366,12 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
         else:
             raise ValueError("Either input_ids or inputs_embeds must be provided.")
         x = self.post_embed_norm(x)
+        
+        attn_prefix_length = 256
 
-        if self.attn_prefix_length is not None and self.attn_prefix_length > 0:
-            causal_mask_mod = partial(prefix_causal_mask, prefix_length=self.attn_prefix_length)
+        if attn_prefix_length > 0:
+            # causal_mask_mod = prefix_wrapper(causal_mask, prefix_length=attn_prefix_length)
+            causal_mask_mod = partial(prefix_causal_mask, prefix_length=attn_prefix_length)
         else:
             causal_mask_mod = causal_mask
 
@@ -463,150 +416,21 @@ def create_params(args):
     # If a parameter is in the model config, regardless of the args, we use the config parameters
     # If a parameter is not in the model config, we use the args parameter
 
-    if "mamba" in args.model:
-        return MambaParams(
-            d_model=cfg["d_model"],
-            d_intermediate=cfg.get("d_intermediate", 0),
-            n_layer=cfg["n_layer"],
-            vocab_size=cfg["vocab_size"],
-            seq_len=cfg["seq_len"],
-            ssm_cfg=cfg.get("ssm_cfg", {}),
-            attn_layer_idx=cfg.get("attn_layer_idx", []),
-            attn_cfg=cfg.get("attn_cfg", {}),
-            rms_norm=cfg["rms_norm"],
-            residual_in_fp32=cfg["residual_in_fp32"],
-            fused_add_norm=cfg["fused_add_norm"],
-            pad_vocab_size_multiple=cfg["pad_vocab_size_multiple"],
-            tie_embeddings=cfg.get("weight_tying", False),
-            weight_tying=cfg.get("weight_tying", False),
-        )
-    else:
-
-        return Params(
-            dim=cfg["hidden_dim"],
-            n_layers=cfg["n_layers"],
-            n_heads=cfg["n_heads"],
-            seq_len=cfg["seq_len"],
-            vocab_size=cfg["vocab_size"],
-            post_embed_norm=cfg["post_embed_norm"],
-            weight_tying=cfg["weight_tying"],
-            model_norm=get_norm_class(cfg.get("model_norm", args.model_norm)),
-            attn_prefix_length=cfg.get("attn_prefix_length", args.attn_prefix_length),
-            apply_qk_norm=cfg.get("qk_norm", args.qk_norm),
-            positional_embedding_type=cfg.get("positional_embedding_type", args.positional_embedding_type),
-            ffn_type=cfg.get("ffn_type", args.ffn_type),
-            moe_num_experts=cfg.get("moe_num_experts", args.moe_num_experts),
-            moe_loss_weight=cfg.get("moe_loss_weight", args.moe_loss_weight),
-            moe_expert_model_parallelism=cfg.get("moe_expert_model_parallelism", args.moe_expert_model_parallelism),
-            moe_weight_parallelism=cfg.get("moe_weight_parallelism", args.moe_weight_parallelism),
-            moe_capacity_factor=cfg.get("moe_capacity_factor", args.moe_capacity_factor),
-            moe_freq=cfg.get("moe_freq", args.moe_freq),
-            moe_top_k=cfg.get("moe_top_k", args.moe_top_k),
-        )
-
-
-if MambaLMHeadModel is not None:
-    # This is a copy-paste of the Mamba SSM code with the addition of inputs_embeds
-    class MixerModelOpenLM(MixerModel):
-        def forward(self, input_ids=None, inputs_embeds=None, inference_params=None, **kwargs):
-            assert input_ids is not None or inputs_embeds is not None
-            hidden_states = self.embedding(input_ids) if inputs_embeds is None else inputs_embeds
-            residual = None
-            for layer in self.layers:
-                hidden_states, residual = layer(hidden_states, residual, inference_params=inference_params)
-            if not self.fused_add_norm:
-                residual = (hidden_states + residual) if residual is not None else hidden_states
-                hidden_states = self.norm_f(residual.to(dtype=self.norm_f.weight.dtype))
-            else:
-                # Set prenorm=False here since we don't need the residual
-                fused_add_norm_fn = rms_norm_fn if isinstance(self.norm_f, RMSNorm) else layer_norm_fn
-                hidden_states = fused_add_norm_fn(
-                    hidden_states,
-                    self.norm_f.weight,
-                    self.norm_f.bias,
-                    eps=self.norm_f.eps,
-                    residual=residual,
-                    prenorm=False,
-                    residual_in_fp32=self.residual_in_fp32,
-                )
-            return hidden_states
-
-    # This is a copy-paste of the Mamba SSM code with the usage of MixerModelOpenLM instead of MixerModel
-    class MambaLMHeadModelOpenLM(MambaLMHeadModel):
-        def __init__(
-            self,
-            config,
-            initializer_cfg=None,
-            device=None,
-            dtype=None,
-        ) -> None:
-            super().__init__(config, initializer_cfg, device, dtype)
-            d_model = config.d_model
-            d_intermediate = config.d_intermediate
-            n_layer = config.n_layer
-            vocab_size = config.vocab_size
-            ssm_cfg = config.ssm_cfg
-            rms_norm = config.rms_norm
-            residual_in_fp32 = config.residual_in_fp32
-            fused_add_norm = config.fused_add_norm
-            factory_kwargs = {"device": device, "dtype": dtype}
-            self.backbone = MixerModelOpenLM(
-                d_model=d_model,
-                d_intermediate=d_intermediate,
-                n_layer=n_layer,
-                vocab_size=vocab_size,
-                ssm_cfg=ssm_cfg,
-                rms_norm=rms_norm,
-                initializer_cfg=initializer_cfg,
-                fused_add_norm=fused_add_norm,
-                residual_in_fp32=residual_in_fp32,
-                **factory_kwargs,
-            )
-        def forward(self, input_ids=None, inputs_embeds=None, inference_params=None, **kwargs):
-            hidden_state = self.backbone(input_ids, inputs_embeds, inference_params)
-            lm_logits = self.lm_head(hidden_state)
-            return lm_logits, hidden_state, inference_params
-
-    class Mamba(nn.Module):
-        # Experimental architecture, please "pip install mamba-ssm"
-        # https://arxiv.org/abs/2312.00752
-        def __init__(self, params):
-
-            super().__init__()
-            self.vocab_size = params.vocab_size
-            self.seq_len = params.seq_len
-            self.dim = params.d_model
-            self.model = MambaLMHeadModelOpenLM(params)
-
-        def reset_parameters(self):
-            return
-
-        def forward(self, input_ids, inputs_embeds=None, inference_params=None, **kwargs):
-            logits, hidden_state, inference_params = self.model(input_ids, inputs_embeds, inference_params, **kwargs)
-            return logits, hidden_state, inference_params
-else:
-
-    class Mamba(nn.Module):
-        # Experimental architecture, please "pip install mamba-ssm"
-        # https://arxiv.org/abs/2312.00752
-        def __init__(self, params):
-            raise ImportError(
-                "MambaLMHeadModel is not available. Please install the 'mamba_ssm' package by running 'pip install mamba-ssm'."
-            )
-
-        def reset_parameters(self):
-            return
-
-        def forward(self, input_ids, inputs_embeds=None, inference_params=None, **kwargs):
-            raise ImportError(
-                "MambaLMHeadModel is not available. Please install the 'mamba_ssm' package by running 'pip install mamba-ssm'."
-            )
+    return Params(
+        dim=cfg["hidden_dim"],
+        n_layers=cfg["n_layers"],
+        n_heads=cfg["n_heads"],
+        seq_len=cfg["seq_len"],
+        vocab_size=cfg["vocab_size"],
+        post_embed_norm=cfg["post_embed_norm"],
+        weight_tying=cfg["weight_tying"],
+        model_norm=get_norm_class(cfg.get("model_norm", args.model_norm)),
+        apply_qk_norm=cfg.get("qk_norm", args.qk_norm),
+        positional_embedding_type=cfg.get("positional_embedding_type", args.positional_embedding_type),
+        ffn_type=cfg.get("ffn_type", args.ffn_type),
+    )
 
 
 def create_model(args):
-    if "mamba" in args.model:
-        model = Mamba(create_params(args))
-        return model
-    else:
-        model = Transformer(create_params(args))
-        return model
+    model = Transformer(create_params(args))
+    return model

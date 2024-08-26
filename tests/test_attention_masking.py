@@ -2,7 +2,7 @@ import torch
 import pytest
 from functools import partial
 
-from open_lm.attention import flex_attn, no_mask, mask_all, prefix_mask, prefix_causal_mask, causal_mask, no_prefix_causal_mask, create_block_mask_cached, no_prefix_mask, offset_causal_mask
+from open_lm.attention import flex_attn, no_mask, mask_all, causal_mask, no_prefix_wrapper, prefix_wrapper
 
 # fex_attn = torch.compile(flex_attn, dynamic=False)
 BLOCK_SIZE = 16
@@ -54,7 +54,7 @@ def _test_mask(
     gradOut = torch.randn(B, H, S, D, device="cuda", dtype=torch.float16)
 
     if mask_mod is not None:
-        block_mask = create_block_mask_cached(mask_mod, 1, 1, S, S, device=query.device, BLOCK_SIZE=BLOCK_SIZE)
+        block_mask = mask_mod
     else:
         block_mask = None
     sdpa_mask_fn = mask_mod if mask_mod is not None else score_mod
@@ -184,38 +184,38 @@ def test_attention_masking():
     values = torch.rand((b, n, h, d)).cuda()
 
     # Test masking all elements
-    block_mask_all = create_block_mask_cached(mask_all, b, h, n, n, device=queries.device, BLOCK_SIZE=BLOCK_SIZE)
-    output_mask_all = flex_attn(queries, keys, values, attention_mask=block_mask_all)
-    assert (output_mask_all==0).all()
-    
+    mask_all_block = create_block_mask(mask_all, b, h, n, n, device=queries.device, BLOCK_SIZE=BLOCK_SIZE)
+    output_mask_all = flex_attn(queries, keys, values, mask_all_block, BLOCK_SIZE=BLOCK_SIZE)
+    assert (output_mask_all == 0).all()
+
     # Test removing the first elements
-    no_prefix_mask_instance = partial(no_prefix_mask, prefix_length=prefix_length)
-    no_prefix_block_mask = create_block_mask_cached(no_prefix_mask_instance, b, h, n, n, device=queries.device, BLOCK_SIZE=BLOCK_SIZE)
-    block_mask_reduced = create_block_mask_cached(no_mask, b, h, n-prefix_length, n-prefix_length, device=queries.device, BLOCK_SIZE=BLOCK_SIZE)
-    
-    output_no_prefix = flex_attn(queries, keys, values, attention_mask=no_prefix_block_mask)
+    no_prefix_mask_instance = prefix_wrapper(no_mask, prefix_length=prefix_length)
+    no_prefix_block_mask = create_block_mask(no_prefix_mask_instance, b, h, n, n, device=queries.device, BLOCK_SIZE=BLOCK_SIZE)
+    output_no_prefix = flex_attn(queries, keys, values, no_prefix_block_mask, BLOCK_SIZE=BLOCK_SIZE)
+    no_mask_block = create_block_mask(no_mask, b, h, n, n, device=queries.device, BLOCK_SIZE=BLOCK_SIZE)
     output_reduced = flex_attn(
         queries[:, prefix_length:],
         keys[:, prefix_length:],
         values[:, prefix_length:],
-        attention_mask=block_mask_reduced
+        no_mask_block,
+        BLOCK_SIZE=BLOCK_SIZE
     )
-    
+
     assert torch.allclose(output_reduced, output_no_prefix[:, prefix_length:], atol=1e-1)
-    
-    
+
+
     # There is a bug with flex attention when the whole line is masked... it returns values that are not 0 (except for the first element)
-    
+
     # # Test causal masking and removing the first elements
-    # no_prefix_causal_mask_instance = partial(no_prefix_causal_mask, prefix_length=prefix_length)
-    causal_block_mask = create_block_mask_cached(causal_mask, b, h, n, n, device=queries.device, BLOCK_SIZE=BLOCK_SIZE)
-    output_causal = flex_attn(queries, keys, values, attention_mask=causal_block_mask)
+    # no_prefix_causal_mask_instance = no_prefix_wrapper(no_prefix_causal_mask, prefix_length=prefix_length)
+    causal_block_mask = create_block_mask(causal_mask, b, h, n, n, device=queries.device, BLOCK_SIZE=BLOCK_SIZE)
+    output_causal = flex_attn(queries, keys, values, causal_block_mask, BLOCK_SIZE=BLOCK_SIZE)
     # no_prefix_causal_block_mask = create_block_mask_cached(no_prefix_causal_mask_instance, b, h, n, n, device=queries.device, BLOCK_SIZE=BLOCK_SIZE)
     # causal_block_mask_reduced = create_block_mask_cached(causal_mask, b, h, n-prefix_length, n-prefix_length, device=queries.device, BLOCK_SIZE=BLOCK_SIZE)
 
     # # Run with all elements but mask the first elements
     # output_causal_no_prefix = flex_attn(queries, keys, values, attention_mask=no_prefix_causal_block_mask)
-    
+
     # # Run without the first elements of the sequence
     # output_causal_reduced = flex_attn(
     #     queries[:, prefix_length:],
@@ -226,34 +226,34 @@ def test_attention_masking():
 
     # print(f"diff = {torch.abs(output_causal_reduced - output_causal_no_prefix[:, prefix_length:]).sum(-1)}")
     # print(f"output_causal_no_prefix: {output_causal_no_prefix[:, prefix_length:].sum(-1)}")
-    
+
     # _test_mask(mask_mod=no_mask, print_mask=True, B=b, H=h, S=n, D=d)
     # _test_mask(mask_mod=mask_all, print_mask=True, B=b, H=h, S=n, D=d)
     # _test_mask(mask_mod=causal_mask, print_mask=True, B=b, H=h, S=n, D=d)
     # _test_mask(mask_mod=no_prefix_mask_instance, print_mask=True, B=b, H=h, S=n, D=d)
     # _test_mask(mask_mod=no_prefix_causal_mask_instance, print_mask=True, B=b, H=h, S=n, D=d)
-    
+
     # assert torch.allclose(output_causal_reduced, output_causal_no_prefix[:, prefix_length:], atol=1e-1)
 
     # Run with the output of attention again and ensure it looks good (e.g., we don't run into NaNs. This happened in
     # initial implementations where the output had NaNs for certain types of masks.
     output3 = flex_attn(
-        output_causal, output_causal, output_causal, attention_mask=causal_block_mask
+        output_causal, output_causal, output_causal, causal_block_mask, BLOCK_SIZE=BLOCK_SIZE
     )
     assert not output3.isnan().any()
-    
+
     # Test prefix mask by computing the full attention on the first elements and causal attention on the rest
-    prefix_causal_mask_instance = partial(prefix_causal_mask, prefix_length=prefix_length)
-    _test_mask(mask_mod=prefix_causal_mask_instance, print_mask=True, B=b, H=h, S=n, D=d)
-    prefix_causal_block_mask = create_block_mask_cached(prefix_causal_mask_instance, b, h, n, n, device=queries.device, BLOCK_SIZE=BLOCK_SIZE)
-    output_prefix_attention = flex_attn(queries, keys, values, attention_mask=prefix_causal_block_mask)
-   
-    output_full_attention_prefix = flex_attn(queries[:, :prefix_length], keys[:, :prefix_length], values[:, :prefix_length], attention_mask=None)
-    
-    offset_causal_mask_instance = partial(offset_causal_mask, offset=prefix_length)
-    rectangulal_causal_block_mask = create_block_mask_cached(offset_causal_mask_instance, b, h, n-prefix_length, n, device=queries.device, BLOCK_SIZE=BLOCK_SIZE)
-    output_causal_attention_suffix = flex_attn(queries[:, prefix_length:], keys, values, attention_mask=rectangulal_causal_block_mask)
-    
+    prefix_causal_mask_instance = prefix_wrapper(causal_mask, prefix_length=prefix_length)
+    prefix_causal_block_mask = create_block_mask(prefix_causal_mask_instance, b, h, n, n, device=queries.device, BLOCK_SIZE=BLOCK_SIZE)
+    output_prefix_attention = flex_attn(queries, keys, values, prefix_causal_block_mask, BLOCK_SIZE=BLOCK_SIZE)
+
+    no_mask_block = create_block_mask(no_mask, b, h, prefix_length, prefix_length, device=queries.device, BLOCK_SIZE=BLOCK_SIZE)
+    output_full_attention_prefix = flex_attn(queries[:, :prefix_length], keys[:, :prefix_length], values[:, :prefix_length], no_mask_block, BLOCK_SIZE=BLOCK_SIZE)
+
+    offset_causal_mask_instance = prefix_wrapper(causal_mask, prefix_length=prefix_length)
+    offset_causal_block_mask = create_block_mask(offset_causal_mask_instance, b, h, n-prefix_length, n, device=queries.device, BLOCK_SIZE=BLOCK_SIZE)
+    output_causal_attention_suffix = flex_attn(queries[:, prefix_length:], keys, values, offset_causal_block_mask, BLOCK_SIZE=BLOCK_SIZE)
+
     assert torch.allclose(output_prefix_attention[:, :prefix_length], output_full_attention_prefix, atol=1e-1)    
     assert torch.allclose(output_prefix_attention[:, prefix_length:], output_causal_attention_suffix, atol=1e-1)
 

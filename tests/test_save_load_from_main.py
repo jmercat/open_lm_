@@ -5,7 +5,8 @@ import shutil
 import torch.multiprocessing as mp
 
 from open_lm.main import main
-
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
 
 def tiny_save_load(fsdp=False, distributed=False):
     """
@@ -20,7 +21,7 @@ def tiny_save_load(fsdp=False, distributed=False):
         "--name", name,
         "--model", "open_lm_test_tiny",
         "--dataset-type", "synthetic",
-        "--logs", logdir,
+        "--logs-dir", logdir,
     ]
     args = [str(x) for x in args]
     # fmt: on
@@ -60,7 +61,7 @@ def tiny_save_load_different_seed(fsdp=False, distributed=False):
         "--name", name,
         "--model", "open_lm_test_tiny",
         "--dataset-type", "synthetic",
-        "--logs", logdir,
+        "--logs-dir", logdir,
     ]
     args = [str(x) for x in args]
     # fmt: on
