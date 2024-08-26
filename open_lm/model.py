@@ -14,7 +14,7 @@ from torch.utils.checkpoint import checkpoint
 
 from huggingface_hub import PyTorchModelHubMixin
 
-from open_lm.attention import flex_attn, no_mask, causal_mask, or_masks, create_block_mask_cached, prefix_mask
+from open_lm.attention import flex_attn, causal_mask, create_block_mask_cached, prefix_mask, prefix_causal_mask
 from open_lm.norms import get_norm_class
 from open_lm.positional_embedding.head_rotary import HeadRotaryWithCast
 from open_lm.positional_embedding.rotary import RotaryWithCast
@@ -90,7 +90,7 @@ class Params:
     post_embed_norm: bool = False
     weight_tying: bool = False
     model_norm: nn.Module = nn.LayerNorm
-    mask_function: Callable = causal_mask
+    attn_prefix_length: int = 0
     apply_qk_norm: bool = False
     moe_loss_weight: float = 0.1
     moe_capacity_factor: float = 1.25
@@ -167,6 +167,7 @@ class CustomAttn(nn.Module):
         self.layer_id = layer_id
         self.dim = args.dim
         self.reset_parameters()
+        self.attn_fct = flex_attn
 
     def reset_parameters(self):
         # initialize weights by trunc_normal(1/sqrt(fan_in))
@@ -197,9 +198,9 @@ class CustomAttn(nn.Module):
         if use_cache:
             past_key_value = [keys, vals]
 
-        attention_mask = create_block_mask_cached(mask_function, batchsize, self.n_heads, q_len, q_len, device=x.device)
+        attention_mask = create_block_mask_cached(mask_function, batchsize, self.n_heads, q_len, q_len + past_length, device=x.device)
 
-        output = flex_attn(
+        output = self.attn_fct(
             queries=queries,
             keys=keys,
             values=vals,
@@ -365,7 +366,7 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
             else nn.Identity()
         )
         self.weight_tying = params.weight_tying
-        self.mask_function = params.mask_function
+        self.attn_prefix_length = params.attn_prefix_length
 
         self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
 
@@ -416,15 +417,20 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
             raise ValueError("Either input_ids or inputs_embeds must be provided.")
         x = self.post_embed_norm(x)
 
+        if self.attn_prefix_length is not None and self.attn_prefix_length > 0:
+            causal_mask_mod = partial(prefix_causal_mask, prefix_length=self.attn_prefix_length)
+        else:
+            causal_mask_mod = causal_mask
+
         if past_key_values is None:
             past_key_values = [None] * self.n_layers
         elif isinstance(past_key_values, tuple):
             past_key_values = list(past_key_values)
         for i, layer in enumerate(self.layers):
             if self.grad_checkpointing:
-                x, past_key_values[i] = checkpoint(layer, x, past_key_values[i], use_cache, mask_function=self.mask_function)
+                x, past_key_values[i] = checkpoint(layer, x, past_key_values[i], use_cache, mask_function=causal_mask_mod)
             else:
-                x, past_key_values[i] = layer(x, past_key_values[i], use_cache=use_cache, mask_function=self.mask_function)
+                x, past_key_values[i] = layer(x, past_key_values[i], use_cache=use_cache, mask_function=causal_mask_mod)
         if past_key_values[0] is None:
             past_key_values = None
         x = self.norm(x)
@@ -475,13 +481,6 @@ def create_params(args):
             weight_tying=cfg.get("weight_tying", False),
         )
     else:
-        
-        prefix_length = cfg.get("attn_prefix_length", args.attn_prefix_length)
-        if prefix_length is not None:
-            mask_mod = partial(prefix_mask, prefix_length=prefix_length)
-        else:
-            mask_mod = no_mask
-        causal_mask_mod = or_masks(causal_mask, mask_mod)
 
         return Params(
             dim=cfg["hidden_dim"],
@@ -492,7 +491,7 @@ def create_params(args):
             post_embed_norm=cfg["post_embed_norm"],
             weight_tying=cfg["weight_tying"],
             model_norm=get_norm_class(cfg.get("model_norm", args.model_norm)),
-            mask_function=causal_mask_mod,
+            attn_prefix_length=cfg.get("attn_prefix_length", args.attn_prefix_length),
             apply_qk_norm=cfg.get("qk_norm", args.qk_norm),
             positional_embedding_type=cfg.get("positional_embedding_type", args.positional_embedding_type),
             ffn_type=cfg.get("ffn_type", args.ffn_type),
