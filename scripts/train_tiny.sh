@@ -7,6 +7,7 @@ TORCHINDUCTOR_VERBOSE=1 CUDA_VISIBLE_DEVICE=1 CUDA_LAUNCH_BLOCKING=1 python open
  --train-num-samples 10_000_000 \
  --precision "amp_bfloat16" \
  --fsdp-amp \
+ --fsdp-use-orig-params \
  --workers 1 \
  --global-batch-size 4 \
  --log-every-n-steps 100 \
@@ -23,7 +24,7 @@ TORCHINDUCTOR_VERBOSE=1 CUDA_VISIBLE_DEVICE=1 CUDA_LAUNCH_BLOCKING=1 python open
  --resume latest \
  --logs logs \
  --z-loss-coefficient 1e-4 \
-#  --attn-prefix-length 128 \
+ --attn-prefix-length 128 \
 #  --torchcompile 
 
 

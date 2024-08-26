@@ -1,6 +1,6 @@
 import torch
 
-from open_lm.attention import torch_attn, custom_attn, xformers_attn, ATTN_ACTIVATIONS, ATTN_SEQ_SCALARS
+from open_lm.attention import flex_attn, causal_mask, create_block_mask_cached
 from open_lm.model import SwiGLUTorch
 from open_lm.precision import get_autocast
 from xformers.ops import SwiGLU
@@ -19,16 +19,11 @@ def test_custom_attn_matches_softmax_attn(threshold=1e-7):
 
         for is_causal in [True, False]:
             torch_out = torch_attn(queries.cpu(), keys.cpu(), values.cpu(), is_causal=is_causal)
-
-            my_out = custom_attn(
-                queries.cpu(),
-                keys.cpu(),
-                values.cpu(),
-                attn_activation="softmax",
-                attn_seq_scalar="none",
-                alpha=1.0,
-                is_causal=is_causal,
-            )
+            if is_causal:
+                block_causal_mask = create_block_mask_cached(causal_mask, bs, h, q_seq_len, k_seq_len)
+            else:
+                block_causal_mask = None
+            my_out = flex_attn(queries.cpu(), keys.cpu(), values.cpu(), block_causal_mask)
 
             assert torch.allclose(
                 torch_out, my_out, atol=threshold
@@ -38,15 +33,7 @@ def test_custom_attn_matches_softmax_attn(threshold=1e-7):
                 # also test xformers attention
                 torch_out = torch_attn(queries.cuda(), keys.cuda(), values.cuda(), is_causal=is_causal)
                 xformers_out = xformers_attn(queries.cuda(), keys.cuda(), values.cuda(), is_causal=is_causal)
-                my_out = custom_attn(
-                    queries.cuda(),
-                    keys.cuda(),
-                    values.cuda(),
-                    attn_activation="softmax",
-                    attn_seq_scalar="none",
-                    alpha=1.0,
-                    is_causal=is_causal,
-                )
+                my_out = flex_attn(queries.cuda(), keys.cuda(), values.cuda(), block_causal_mask)
 
                 assert torch.allclose(
                     torch_out, my_out, atol=threshold
@@ -70,15 +57,11 @@ def test_no_failure():
                 values = torch.rand(bs, k_seq_len, h, d)
 
                 for is_causal in [True, False]:
-                    custom_attn(
-                        queries,
-                        keys,
-                        values,
-                        attn_activation=nl,
-                        attn_seq_scalar=os,
-                        alpha=1.0,
-                        is_causal=is_causal,
-                    )
+                    if is_causal:
+                        block_causal_mask = create_block_mask_cached(causal_mask, bs, h, q_seq_len, k_seq_len)
+                    else:
+                        block_causal_mask = None
+                    my_out = flex_attn(queries, keys, values, block_causal_mask)
 
     assert True
 

@@ -74,8 +74,8 @@ class RotaryEmbedding(torch.nn.Module):
             freqs = torch.einsum("i,j->ij", t, self.inv_freq.to(dtype).to(device))
             emb = torch.cat((freqs, freqs), dim=-1).to(device)
 
-            self._cos_cached = emb.cos()[None, :, None, :].to(dtype)
-            self._sin_cached = emb.sin()[None, :, None, :].to(dtype)
+            self._cos_cached = emb.cos()[None, :, None, :].to(dtype).to(device)
+            self._sin_cached = emb.sin()[None, :, None, :].to(dtype).to(device)
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, offset: int = 0) -> Tuple[torch.Tensor, torch.Tensor]:
         self._update_cos_sin_tables(k.shape[1] + offset, device=k.device, dtype=k.dtype)

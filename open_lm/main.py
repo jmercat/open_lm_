@@ -679,6 +679,22 @@ def main(args):
         # tokens handled with same modulo in dataloading
         args.target_mask_individual = proc_token(args.target_mask_individual, args.vocab_size)
 
+    # from torch.fx import Tracer, GraphModule
+    # from open_lm.positional_embedding.rotary import RotaryEmbedding, RotaryWithCast
+
+    # class CustomTracer(Tracer):
+    #     def is_leaf_module(self, m, module_qualified_name):
+    #         # Prevent tracing of specific modules
+    #         if isinstance(m, RotaryEmbedding) or isinstance(m, RotaryWithCast):
+    #             return True
+    #         return super().is_leaf_module(m, module_qualified_name)
+
+    # # Assuming 'model' is your PyTorch model
+    # tracer = CustomTracer()
+    # traced = tracer.trace(model)
+    # print(traced.graph)
+    # breakpoint()
+
     if args.torchcompile:
         logging.info("Compiling model...")
         model = torch.compile(model)
@@ -686,6 +702,7 @@ def main(args):
             logging.info("Compiling averagers...")
             for k in averagers.avgs_dict:
                 averagers.avgs_dict[k].av_model = torch.compile(averagers.avgs_dict[k].av_model)
+
 
     # optionally resume optimizer from a checkpoint
     # this needs to be after torchcompile

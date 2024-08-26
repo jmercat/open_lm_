@@ -5,6 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Callable
+from functools import partial
 
 import torch
 import torch.nn.functional as F
@@ -13,26 +14,26 @@ from torch.utils.checkpoint import checkpoint
 
 from huggingface_hub import PyTorchModelHubMixin
 
-from open_lm.attention import get_attn_func, torch_attn, no_mask, causal_mask, or_masks, create_block_mask_cached, BlockMask
+from open_lm.attention import flex_attn, no_mask, causal_mask, or_masks, create_block_mask_cached, prefix_mask
 from open_lm.norms import get_norm_class
 from open_lm.positional_embedding.head_rotary import HeadRotaryWithCast
 from open_lm.positional_embedding.rotary import RotaryWithCast
 from open_lm.positional_embedding.llama_rotary import LLaMARotaryWithCast
 from open_lm.positional_embedding.none import identity_with_cast
 
-# from open_lm.moe.mixture_of_experts import MoE
-try:
-    from megablocks.layers.moe import MoE
-    from megablocks.layers.arguments import Arguments as MoEArgs
-except ImportError:
-    MoE = None
-    MoEArgs = None
+# # from open_lm.moe.mixture_of_experts import MoE
+# try:
+#     from megablocks.layers.moe import MoE
+#     from megablocks.layers.arguments import Arguments as MoEArgs
+# except ImportError:
+MoE = None
+MoEArgs = None
 
-try:  # optional import
-    from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel, MixerModel
-    from mamba_ssm.ops.triton.layernorm import RMSNorm, layer_norm_fn, rms_norm_fn
-except ImportError:
-    MambaLMHeadModel = None
+# try:  # optional import
+#     from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel, MixerModel
+#     from mamba_ssm.ops.triton.layernorm import RMSNorm, layer_norm_fn, rms_norm_fn
+# except ImportError:
+MambaLMHeadModel = None
 
 # from openclip
 _MODEL_CONFIG_PATHS = [Path(__file__).parent / f"model_configs/"]
@@ -89,8 +90,7 @@ class Params:
     post_embed_norm: bool = False
     weight_tying: bool = False
     model_norm: nn.Module = nn.LayerNorm
-    attn_func: Callable = torch_attn
-    attention_mask: BlockMask = None
+    mask_function: Callable = causal_mask
     apply_qk_norm: bool = False
     moe_loss_weight: float = 0.1
     moe_capacity_factor: float = 1.25
@@ -132,6 +132,10 @@ def get_pos_embed(args: Params):
         raise RuntimeError(f"Unknown positional embedding type {args.positional_embedding_type}")
 
 
+def causal_mask(b, h, q_idx, kv_idx):
+    return kv_idx <= q_idx
+
+
 class CustomAttn(nn.Module):
     def __init__(self, layer_id, args: Params):
         super().__init__()
@@ -140,9 +144,7 @@ class CustomAttn(nn.Module):
         self.in_proj = nn.Linear(args.dim, 3 * args.n_heads * self.head_dim, bias=False)
         self.out_proj = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
         self.pos_embed = get_pos_embed(args)
-        self.attn_fn = args.attn_func
         self.apply_qk_norm = args.apply_qk_norm
-        self.attention_mask = args.attention_mask
 
         # initialize norm layers for queries and keys if needed
         self.q_norm = (
@@ -174,7 +176,7 @@ class CustomAttn(nn.Module):
         std = std / math.sqrt(2 * (self.layer_id + 1))
         torch.nn.init.trunc_normal_(self.out_proj.weight, std=std, a=-3 * std, b=3 * std)
 
-    def forward(self, x: torch.Tensor, is_causal=True, past_key_value=None, use_cache=False, attention_mask=None):
+    def forward(self, x: torch.Tensor, past_key_value=None, use_cache=False, mask_function=causal_mask):
         batchsize, q_len, _ = x.shape
         queries, keys, vals = self.in_proj(x).chunk(3, dim=-1)
 
@@ -195,11 +197,12 @@ class CustomAttn(nn.Module):
         if use_cache:
             past_key_value = [keys, vals]
 
-        output = self.attn_fn(
-            queries,
-            keys,
-            vals,
-            is_causal=is_causal,
+        attention_mask = create_block_mask_cached(mask_function, batchsize, self.n_heads, q_len, q_len, device=x.device)
+
+        output = flex_attn(
+            queries=queries,
+            keys=keys,
+            values=vals,
             attention_mask=attention_mask,
         )
 
@@ -327,13 +330,12 @@ class Block(nn.Module):
             std = std / math.sqrt(2 * (self.layer_id + 1))
             torch.nn.init.trunc_normal_(self._ff_w2.weight, std=std, a=-3 * std, b=3 * std)
 
-    def forward(self, x, past_key_value=None, use_cache=False, attention_mask=None):
+    def forward(self, x, past_key_value=None, use_cache=False, mask_function=causal_mask):
         h, past_key_value = self.attention(
             self.attention_norm(x),
-            is_causal=True,
             past_key_value=past_key_value,
             use_cache=use_cache,
-            attention_mask=attention_mask,
+            mask_function=mask_function,
         )
         h = x + h
         if self._ffn_type == "moe":
@@ -349,7 +351,6 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
         super().__init__()
         # for convenience we often share param names with llama
         self.params = params
-        self.attention_mask = params.attention_mask
         self.dim = params.dim
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
@@ -364,6 +365,7 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
             else nn.Identity()
         )
         self.weight_tying = params.weight_tying
+        self.mask_function = params.mask_function
 
         self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
 
@@ -399,19 +401,13 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
     def set_grad_checkpointing(self, enable=True):
         self.grad_checkpointing = enable
 
-    def forward(self, input_ids=None, inputs_embeds=None, past_key_values=None, use_cache=False, attention_mask=None):
+    def forward(self, input_ids=None, inputs_embeds=None, past_key_values=None, use_cache=False):
         """
         Args:
             input
             past_key_values
             use_cache (bool)
-            attention_mask (torch.Tensor): Shape (batch_size, sequence_len), indicates tokens that should not be
-                attended to. attention_mask[s, i] = False indicates that token i should not be attended to by any other
-                token for sequence s.
         """
-        if self.attention_mask is not None:
-            assert attention_mask is None, "Cannot pass attention_mask if it is already set in the model."
-            attention_mask = self.attention_mask
         if input_ids is not None:
             x = self.tok_embeddings(input_ids)
         elif inputs_embeds is not None:
@@ -426,9 +422,9 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
             past_key_values = list(past_key_values)
         for i, layer in enumerate(self.layers):
             if self.grad_checkpointing:
-                x, past_key_values[i] = checkpoint(layer, x, past_key_values[i], use_cache, attention_mask)
+                x, past_key_values[i] = checkpoint(layer, x, past_key_values[i], use_cache, mask_function=self.mask_function)
             else:
-                x, past_key_values[i] = layer(x, past_key_values[i], use_cache=use_cache, attention_mask=attention_mask)
+                x, past_key_values[i] = layer(x, past_key_values[i], use_cache=use_cache, mask_function=self.mask_function)
         if past_key_values[0] is None:
             past_key_values = None
         x = self.norm(x)
@@ -453,7 +449,7 @@ def create_params(args):
     if args.model in _MODEL_CONFIGS:
         cfg = deepcopy(_MODEL_CONFIGS[args.model])
     else:
-        raise ValueError("Pass a pre-defined open_lm model name or a json config")
+        raise ValueError(f"Unknows model {args.model}. Pass a pre-defined open_lm model name or a json config")
 
     # Note: here all the parameters should come from the config file
     # but for retro-compatibility, we add new model parameters to the args (with a default value that matches the old version)
@@ -464,10 +460,13 @@ def create_params(args):
     if "mamba" in args.model:
         return MambaParams(
             d_model=cfg["d_model"],
+            d_intermediate=cfg.get("d_intermediate", 0),
             n_layer=cfg["n_layer"],
             vocab_size=cfg["vocab_size"],
             seq_len=cfg["seq_len"],
-            ssm_cfg={},
+            ssm_cfg=cfg.get("ssm_cfg", {}),
+            attn_layer_idx=cfg.get("attn_layer_idx", []),
+            attn_cfg=cfg.get("attn_cfg", {}),
             rms_norm=cfg["rms_norm"],
             residual_in_fp32=cfg["residual_in_fp32"],
             fused_add_norm=cfg["fused_add_norm"],
@@ -476,17 +475,13 @@ def create_params(args):
             weight_tying=cfg.get("weight_tying", False),
         )
     else:
+        
         prefix_length = cfg.get("attn_prefix_length", args.attn_prefix_length)
-        attention_mask = None
-        if cfg.get("attn_name", args.attn_name) == "flex_attn":
-            if prefix_length is not None:
-                def prefix_mask(b, h, q_idx, kv_idx):
-                    return kv_idx <= prefix_length
-                mask_mod = prefix_mask
-            else:
-                mask_mod = no_mask
-            causal_mask_mod = or_masks(causal_mask, mask_mod)
-            attention_mask = create_block_mask_cached(causal_mask_mod, args.global_batch_size, cfg["n_heads"], cfg["seq_len"], cfg["seq_len"])
+        if prefix_length is not None:
+            mask_mod = partial(prefix_mask, prefix_length=prefix_length)
+        else:
+            mask_mod = no_mask
+        causal_mask_mod = or_masks(causal_mask, mask_mod)
 
         return Params(
             dim=cfg["hidden_dim"],
@@ -497,13 +492,7 @@ def create_params(args):
             post_embed_norm=cfg["post_embed_norm"],
             weight_tying=cfg["weight_tying"],
             model_norm=get_norm_class(cfg.get("model_norm", args.model_norm)),
-            attn_func=get_attn_func(
-                cfg.get("attn_name", args.attn_name),
-                cfg.get("attn_activation", args.attn_activation),
-                cfg.get("attn_seq_scalar", args.attn_seq_scalar),
-                cfg.get("attn_seq_scalar_alpha", args.attn_seq_scalar_alpha),
-            ),
-            attention_mask=attention_mask,
+            mask_function=causal_mask_mod,
             apply_qk_norm=cfg.get("qk_norm", args.qk_norm),
             positional_embedding_type=cfg.get("positional_embedding_type", args.positional_embedding_type),
             ffn_type=cfg.get("ffn_type", args.ffn_type),
@@ -516,33 +505,6 @@ def create_params(args):
             moe_top_k=cfg.get("moe_top_k", args.moe_top_k),
         )
 
-if MambaLMHeadModel is not None:
-    # This is a copy-paste of the Mamba SSM code with the addition of inputs_embeds
-    class MixerModelOpenLM(MixerModel):
-        def forward(self, input_ids=None, inputs_embeds=None, inference_params=None, **kwargs):
-            assert input_ids is not None or inputs_embeds is not None
-            hidden_states = self.embedding(input_ids) if inputs_embeds is None else inputs_embeds
-            residual = None
-            for layer in self.layers:
-                hidden_states, residual = layer(
-                    hidden_states, residual, inference_params=inference_params
-                )
-            if not self.fused_add_norm:
-                residual = (hidden_states + residual) if residual is not None else hidden_states
-                hidden_states = self.norm_f(residual.to(dtype=self.norm_f.weight.dtype))
-            else:
-                # Set prenorm=False here since we don't need the residual
-                fused_add_norm_fn = rms_norm_fn if isinstance(self.norm_f, RMSNorm) else layer_norm_fn
-                hidden_states = fused_add_norm_fn(
-                    hidden_states,
-                    self.norm_f.weight,
-                    self.norm_f.bias,
-                    eps=self.norm_f.eps,
-                    residual=residual,
-                    prenorm=False,
-                    residual_in_fp32=self.residual_in_fp32,
-                )
-            return hidden_states
 
 if MambaLMHeadModel is not None:
     # This is a copy-paste of the Mamba SSM code with the addition of inputs_embeds
@@ -581,6 +543,7 @@ if MambaLMHeadModel is not None:
         ) -> None:
             super().__init__(config, initializer_cfg, device, dtype)
             d_model = config.d_model
+            d_intermediate = config.d_intermediate
             n_layer = config.n_layer
             vocab_size = config.vocab_size
             ssm_cfg = config.ssm_cfg
@@ -590,6 +553,7 @@ if MambaLMHeadModel is not None:
             factory_kwargs = {"device": device, "dtype": dtype}
             self.backbone = MixerModelOpenLM(
                 d_model=d_model,
+                d_intermediate=d_intermediate,
                 n_layer=n_layer,
                 vocab_size=vocab_size,
                 ssm_cfg=ssm_cfg,
@@ -608,16 +572,11 @@ if MambaLMHeadModel is not None:
         # Experimental architecture, please "pip install mamba-ssm"
         # https://arxiv.org/abs/2312.00752
         def __init__(self, params):
-            if MambaLMHeadModel is None:
-                raise ImportError(
-                    "MambaLMHeadModel is not available. Please install the 'mamba_ssm' package by running 'pip install mamba-ssm'."
-                )
 
             super().__init__()
             self.vocab_size = params.vocab_size
             self.seq_len = params.seq_len
             self.dim = params.d_model
-
             self.model = MambaLMHeadModelOpenLM(params)
 
         def reset_parameters(self):
@@ -626,7 +585,6 @@ if MambaLMHeadModel is not None:
         def forward(self, input_ids, inputs_embeds=None, inference_params=None, **kwargs):
             logits, hidden_state, inference_params = self.model(input_ids, inputs_embeds, inference_params, **kwargs)
             return logits, hidden_state, inference_params
-
 else:
 
     class Mamba(nn.Module):
