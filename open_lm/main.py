@@ -176,6 +176,7 @@ def load_optimizer(args, model, optimizer, scaler):
     if "optimizer" in checkpoint:
         if optimizer is not None:
             osd = checkpoint["optimizer"]
+            osd = {k.replace("_orig_mod.", ""): v for k, v in osd.items()}
             if args.fsdp:
                 osd = FSDP.optim_state_dict_to_load(model=model, optim=optimizer, optim_state_dict=osd)
             optimizer.load_state_dict(osd)
