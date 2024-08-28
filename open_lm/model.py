@@ -381,7 +381,7 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
             past_key_values = list(past_key_values)
         for i, layer in enumerate(self.layers):
             if self.grad_checkpointing:
-                x, past_key_values[i] = checkpoint(layer, x, past_key_values[i], use_cache, mask_function=causal_mask_mod)
+                x, past_key_values[i] = checkpoint(layer, x, past_key_values[i], use_cache, causal_mask_mod)
             else:
                 x, past_key_values[i] = layer(x, past_key_values[i], use_cache=use_cache, mask_function=causal_mask_mod)
         if past_key_values[0] is None:
