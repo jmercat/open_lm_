@@ -88,6 +88,7 @@ class OpenLMforCausalLM(OpenLMModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        attn_prefix_length: Optional[int] = 0,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
@@ -125,6 +126,7 @@ class OpenLMforCausalLM(OpenLMModel):
             inputs_embeds=inputs_embeds,
             past_key_values=past_key_values,
             use_cache=use_cache,
+            attn_prefix_length=attn_prefix_length,
         )
         loss = None
         if labels is not None:
