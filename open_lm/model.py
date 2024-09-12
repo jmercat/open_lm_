@@ -367,8 +367,6 @@ class Transformer(nn.Module, PyTorchModelHubMixin):
             raise ValueError("Either input_ids or inputs_embeds must be provided.")
         x = self.post_embed_norm(x)
         
-        attn_prefix_length = 256
-
         if attn_prefix_length > 0:
             # causal_mask_mod = prefix_wrapper(causal_mask, prefix_length=attn_prefix_length)
             causal_mask_mod = partial(prefix_causal_mask, prefix_length=attn_prefix_length)
